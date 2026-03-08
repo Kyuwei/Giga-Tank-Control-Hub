@@ -48,19 +48,28 @@ def extract_tank_data(d):
 
     return int(speed_kmh), int(rpm), gear, ammo, stab, crew, crew_total, tank_name
 
+def open_serial(port):
+    """Opens the serial port and waits for the Arduino to reset."""
+    ser = serial.Serial(port, BAUD_RATE, timeout=1)
+    time.sleep(2)  # Wait for Arduino reset
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+    return ser
+
+
 def main():
     port = find_arduino_port()
 
     print(f"Connecting to Arduino on {port}...")
     try:
-        ser = serial.Serial(port, BAUD_RATE, timeout=1)
-        time.sleep(2)  # Wait for Arduino reset
+        ser = open_serial(port)
         print("Connection established. War Thunder telemetry bridge started!")
     except serial.SerialException as e:
         print(f"Error: {e}")
         return
 
     offline_counter = 0
+    drain_counter = 0
 
     while True:
         data = get_indicators()
@@ -82,8 +91,28 @@ def main():
                 time.sleep(0.1)
                 continue
 
-        ser.write(msg.encode('utf-8'))
-        print(f"> {msg.strip()}")
+        try:
+            ser.write(msg.encode('utf-8'))
+            ser.flush()  # Ensure data is transmitted immediately
+            print(f"> {msg.strip()}")
+        except (serial.SerialException, OSError) as e:
+            print(f"Serial write error: {e}. Attempting to reconnect...")
+            ser.close()
+            time.sleep(2)
+            try:
+                ser = open_serial(port)
+                print("Reconnected successfully.")
+            except serial.SerialException as reconnect_err:
+                print(f"Reconnection failed: {reconnect_err}")
+                return
+
+        # Periodically drain the input buffer to prevent USB CDC flow-control
+        # back-pressure from blocking outbound transfers.
+        drain_counter += 1
+        if drain_counter >= 50:  # every ~5 seconds at 10 Hz
+            ser.reset_input_buffer()
+            drain_counter = 0
+
         time.sleep(0.1)  # 10 Hz refresh rate
 
 if __name__ == '__main__':
