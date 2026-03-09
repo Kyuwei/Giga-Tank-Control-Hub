@@ -2,16 +2,31 @@ import requests
 import serial
 import serial.tools.list_ports
 import time
+import io
+import base64
+
+try:
+    from PIL import Image as _PIL_Image
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
+    print("INFO: Pillow non installe — fond de carte desactive. "
+          "Installer avec : pip install Pillow")
 
 BAUD_RATE      = 115200
 WT_INDICATORS  = "http://127.0.0.1:8111/indicators"
 WT_MAP_OBJ     = "http://127.0.0.1:8111/map_obj.json"
 WT_MAP_INFO    = "http://127.0.0.1:8111/map_info.json"
+WT_MAP_IMG     = "http://127.0.0.1:8111/map.img"
 
 # Maximum number of map entities sent per message (mirrors MAP_MAX_ENT in the .ino).
 MAX_MAP_ENTITIES = 20
 # Send a map update every MAP_INTERVAL main-loop iterations (10 Hz ÷ 2 = 5 Hz).
 MAP_INTERVAL = 2
+# Dimensions de l'image envoyee a l'Arduino (doit correspondre a MAP_RAW_W/H dans le .ino).
+# 148 × 5 = 740 = MAP_CONT_W, 65 × 5 = 325 = MAP_CONT_H → echelle exacte 5×.
+MAP_IMG_W = 148
+MAP_IMG_H = 65
 
 def find_arduino_port():
     """Detects the Arduino GIGA R1 serial port automatically."""
@@ -45,6 +60,34 @@ def get_map_data():
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
         pass
     return None, None
+
+def get_encoded_map_image():
+    """
+    Recupere l'image de la carte depuis War Thunder (/map.img), la redimensionne a
+    (MAP_IMG_W × MAP_IMG_H) et retourne les pixels RGB565 little-endian en base64.
+    Format du message envoye a l'Arduino : MAPRAW:{base64}\\n
+    Retourne None si Pillow n'est pas installe ou en cas d'erreur reseau/image.
+    """
+    if not _PIL_AVAILABLE:
+        return None
+    try:
+        r = requests.get(WT_MAP_IMG, timeout=1.5)
+        if r.status_code != 200:
+            return None
+        img = _PIL_Image.open(io.BytesIO(r.content)).convert("RGB")
+        img = img.resize((MAP_IMG_W, MAP_IMG_H), _PIL_Image.LANCZOS)
+        # Conversion en RGB565 little-endian (format natif LVGL sur ARM Cortex-M little-endian).
+        # Chaque pixel : R5 G6 B5, stocke en little-endian (octet bas en premier).
+        raw = bytearray(MAP_IMG_W * MAP_IMG_H * 2)
+        idx = 0
+        for r8, g8, b8 in img.getdata():
+            v = ((r8 >> 3) << 11) | ((g8 >> 2) << 5) | (b8 >> 3)
+            raw[idx]     = v & 0xFF          # octet bas : GGGBBBBB
+            raw[idx + 1] = (v >> 8) & 0xFF  # octet haut : RRRRRGGG
+            idx += 2
+        return base64.b64encode(bytes(raw)).decode('ascii')
+    except Exception:
+        return None
 
 def extract_tank_data(d):
     """
@@ -156,6 +199,7 @@ def main():
     offline_counter = 0
     drain_counter   = 0
     map_counter     = 0
+    last_map_gen    = -1   # Detecte le changement de carte pour envoyer le fond d'image
 
     while True:
         data = get_indicators()
@@ -204,6 +248,21 @@ def main():
                     ser.flush()
                 except (serial.SerialException, OSError):
                     pass  # Reconnect will be handled on the next telemetry write
+
+                # ── Fond de carte (une seule fois par partie/map_generation) ─────────
+                current_gen = int(map_info.get("map_generation", -1))
+                if current_gen != last_map_gen:
+                    last_map_gen = current_gen
+                    encoded = get_encoded_map_image()
+                    if encoded is not None:
+                        img_msg = f"MAPRAW:{encoded}\n"
+                        try:
+                            ser.write(img_msg.encode("utf-8"))
+                            ser.flush()
+                            print(f"> MAPRAW: {len(encoded)} chars "
+                                  f"(gen={current_gen}, ~{len(encoded)//1000} KB)")
+                        except (serial.SerialException, OSError):
+                            pass
 
         # ── Periodic input-buffer drain ───────────────────────────────────────
         # Prevents USB CDC flow-control back-pressure from blocking outbound transfers.

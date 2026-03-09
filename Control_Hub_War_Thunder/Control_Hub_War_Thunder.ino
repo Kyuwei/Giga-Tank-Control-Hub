@@ -32,10 +32,36 @@ lv_obj_t * telem_status;
 #define MAP_CONT_W   740
 #define MAP_CONT_H   325
 
+// ===== IMAGE D'ARRIERE-PLAN CARTE =====
+// Dimensions de l'image RGB565 recue du PC (doit correspondre a MAP_IMG_W/H dans wt_telemetry.py).
+// 148 × 5 = 740 = MAP_CONT_W, 65 × 5 = 325 = MAP_CONT_H → echelle 5× exacte, aucun rognage.
+#define MAP_RAW_W      148
+#define MAP_RAW_H      65
+// Facteur d'echelle LVGL : 256 = 100%, donc 5× = 1280.
+#define MAP_BG_SCALE   1280
+// Taille du tampon RGB565 en octets (2 octets par pixel).
+#define MAP_RAW_BYTES  (MAP_RAW_W * MAP_RAW_H * 2)
+// Taille max du payload base64 (ceil(MAP_RAW_BYTES × 4 / 3) + marge de securite).
+#define MAP_B64_MAX    26000
+
+// Assure la compatibilite si LV_IMAGE_HEADER_MAGIC n'est pas expose par la version Arduino de LVGL.
+#ifndef LV_IMAGE_HEADER_MAGIC
+#  define LV_IMAGE_HEADER_MAGIC  0x19U
+#endif
+
 static lv_obj_t * map_name_label;
 static lv_obj_t * map_wait_label;
 static lv_obj_t * map_container;
 static lv_obj_t * map_dots[MAP_MAX_ENT];
+
+// Tampon RGB565 pour l'image d'arriere-plan (ecrit par le thread serie, lu par le thread M7).
+static uint8_t        g_map_raw[MAP_RAW_BYTES];
+// Descripteur d'image LVGL pointant en permanence sur g_map_raw.
+static lv_image_dsc_t map_img_dsc;
+// Widget image d'arriere-plan (cree et utilise dans le thread M7 uniquement).
+static lv_obj_t     * map_bg_img    = NULL;
+// Drapeau : g_map_raw contient de nouveaux pixels a afficher (protege par g_data_mutex).
+static volatile bool  g_img_updated = false;
 
 // ===== DONNEES PARTAGEES (thread serial <-> thread LVGL/M7) =====
 // All fields written by the serial thread and read by the main loop.
@@ -168,6 +194,47 @@ void make_hud_bar(lv_obj_t * parent, lv_obj_t ** label_out) {
     lv_obj_set_width(*label_out, 465);
     lv_label_set_long_mode(*label_out, LV_LABEL_LONG_DOT);
     lv_obj_align(*label_out, LV_ALIGN_LEFT_MID, 10, 0);
+}
+
+// ===== DECODAGE BASE64 (thread serie) =====
+// Decodage autonome, sans librairie externe.
+// Retourne le nombre d'octets ecrits dans dst, ou 0 si src_len == 0.
+static uint32_t b64_decode_buf(const uint8_t * src, size_t src_len,
+                                uint8_t * dst,       size_t dst_max) {
+    // Table de valeurs : -1 = invalide, -2 = padding ('='), 0-63 = valeur base64.
+    static const int8_t T[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0x00 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0x10 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,  /* 0x20  +  / */
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-2,-1,-1,  /* 0x30  0-9  = */
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14, /* 0x40  A-O */
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,  /* 0x50  P-Z */
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40, /* 0x60  a-o */
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,  /* 0x70  p-z */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0x80 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0x90 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0xA0 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0xB0 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0xC0 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0xD0 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 0xE0 */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1   /* 0xF0 */
+    };
+    uint32_t out  = 0;
+    int      acc  = 0;
+    int      bits = 0;
+    for (size_t i = 0; i < src_len; i++) {
+        int v = T[(uint8_t)src[i]];
+        if (v < 0) { if (v == -2) break; continue; }  // Ignore invalide, stop sur '='
+        acc   = (acc << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (out >= dst_max) break;
+            dst[out++] = (uint8_t)((acc >> bits) & 0xFF);
+        }
+    }
+    return out;
 }
 
 // ===== COULEUR ENTITE CARTE =====
@@ -347,6 +414,24 @@ void build_screen_map() {
     lv_obj_set_style_radius(map_container, 5, LV_PART_MAIN);
     lv_obj_set_style_pad_all(map_container, 0, LV_PART_MAIN);
     lv_obj_remove_flag(map_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    // ── Image d'arriere-plan (cree en PREMIER = z-order le plus bas = derriere les points) ──
+    // Initialise le descripteur LVGL une fois pour toutes ; g_map_raw est le tampon de pixels.
+    map_img_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+    map_img_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+    map_img_dsc.header.flags  = 0;
+    map_img_dsc.header.w      = MAP_RAW_W;
+    map_img_dsc.header.h      = MAP_RAW_H;
+    map_img_dsc.header.stride = (uint16_t)(MAP_RAW_W * 2);  // octets par ligne
+    map_img_dsc.data_size     = MAP_RAW_BYTES;
+    map_img_dsc.data          = g_map_raw;
+
+    map_bg_img = lv_image_create(map_container);
+    lv_image_set_src(map_bg_img, &map_img_dsc);
+    lv_obj_set_pos(map_bg_img, 0, 0);
+    lv_image_set_pivot(map_bg_img, 0, 0);        // ancre en haut a gauche pour le scaling
+    lv_image_set_scale(map_bg_img, MAP_BG_SCALE); // 5× : 148→740, 65→325
+    lv_obj_add_flag(map_bg_img, LV_OBJ_FLAG_HIDDEN);  // cache jusqu'a reception de la 1re image
 
     // Waiting placeholder shown until the first map message arrives.
     map_wait_label = lv_label_create(map_container);
@@ -535,40 +620,95 @@ static void apply_map_update(const MapShared& d) {
     }
 }
 
+// ===== LVGL UPDATE - IMAGE D'ARRIERE-PLAN (thread M7 uniquement) =====
+// Appele apres qu'un nouveau MAPRAW: a ete decode dans g_map_raw.
+// g_data_mutex n'est PAS tenu ici : les messages MAPRAW sont espaces d'au moins plusieurs
+// secondes (un par partie), donc le tampon est stable le temps du rendu.
+static void apply_map_image() {
+    if (map_bg_img == NULL) return;
+    // Forcer LVGL a relire le descripteur et invalider la zone d'affichage.
+    lv_image_set_src(map_bg_img, &map_img_dsc);
+    lv_obj_remove_flag(map_bg_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(map_bg_img);
+}
+
 // ===== THREAD SERIE (role M4 : donnees & reseau) =====
 // Runs at osPriorityHigh. Reads bytes from Serial, assembles lines, parses
 // them into the shared structs, and signals the main loop via the update
 // flags. LVGL is never touched here.
+//
+// Deux modes de reception :
+//   - Mode texte   : accumule les caracteres dans text_buf (max 512) jusqu'au '\n'.
+//                    Detecte le prefixe "MAPRAW:" (7 chars) et bascule en mode image.
+//   - Mode image   : accumule le payload base64 dans s_b64buf (26 KB statique) jusqu'au '\n',
+//                    puis decode en RGB565 dans g_map_raw et leve g_img_updated.
 void serial_task() {
-    String buf;
-    buf.reserve(512);
+    String text_buf;
+    text_buf.reserve(512);
+
+    // Tampon statique dedie au payload base64 des messages MAPRAW:
+    // Alloue en BSS (static) pour ne pas saturer les 8 KB de stack du thread.
+    static uint8_t s_b64buf[MAP_B64_MAX];
+    static size_t  s_b64len   = 0;
+    static bool    s_in_image = false;   // true = on accumule un payload MAPRAW:
+
     while (true) {
         while (Serial.available()) {
             char c = (char)Serial.read();
+
             if (c == '\n') {
-                buf.trim();
-                if (buf.length() > 0) {
-                    if (buf.startsWith("MAPNAME:")) {
-                        // Parse outside the mutex to keep lock time minimal
-                        MapShared local;
-                        parse_map_string(buf, local);
+                if (s_in_image) {
+                    // Payload base64 complet → decode dans le tampon partage
+                    uint32_t decoded = b64_decode_buf(s_b64buf, s_b64len,
+                                                      g_map_raw, MAP_RAW_BYTES);
+                    if (decoded == MAP_RAW_BYTES) {
                         g_data_mutex.lock();
-                        g_map         = local;
-                        g_map_updated = true;
-                        g_data_mutex.unlock();
-                    } else {
-                        TelemShared local;
-                        parse_telem_string(buf, local);
-                        g_data_mutex.lock();
-                        g_telem         = local;
-                        g_telem_updated = true;
+                        g_img_updated = true;
                         g_data_mutex.unlock();
                     }
+                    s_in_image = false;
+                    s_b64len   = 0;
+                } else {
+                    text_buf.trim();
+                    if (text_buf.length() > 0) {
+                        if (text_buf.startsWith("MAPNAME:")) {
+                            // Parse outside the mutex to keep lock time minimal
+                            MapShared local;
+                            parse_map_string(text_buf, local);
+                            g_data_mutex.lock();
+                            g_map         = local;
+                            g_map_updated = true;
+                            g_data_mutex.unlock();
+                        } else {
+                            TelemShared local;
+                            parse_telem_string(text_buf, local);
+                            g_data_mutex.lock();
+                            g_telem         = local;
+                            g_telem_updated = true;
+                            g_data_mutex.unlock();
+                        }
+                    }
+                    text_buf = "";
                 }
-                buf = "";
             } else {
-                if ((size_t)buf.length() < 512) buf += c;
-                else                            buf  = "";  // drop runaway frame
+                if (s_in_image) {
+                    // Accumule le payload base64
+                    if (s_b64len < MAP_B64_MAX - 1)
+                        s_b64buf[s_b64len++] = (uint8_t)c;
+                    // else : trame corrompue / trop grande — octet ignore silencieusement
+                } else {
+                    if ((size_t)text_buf.length() < 512) {
+                        text_buf += c;
+                        // Apres 7 caracteres, verifie si c'est un prefixe MAPRAW:
+                        if (text_buf.length() == 7 && text_buf.equals("MAPRAW:")) {
+                            s_in_image = true;
+                            s_b64len   = 0;
+                            text_buf   = "";  // Efface le prefixe (dimensions connues a la compile)
+                        }
+                    } else {
+                        text_buf = "";  // Drop runaway frame
+                    }
+                }
             }
         }
         // Yield for 2 ms so the M7 loop and USB stack get CPU time
@@ -615,7 +755,7 @@ void loop() {
     // ── Snapshot shared data under mutex (critical section is a struct copy only) ──
     static TelemShared local_telem;
     static MapShared   local_map;
-    bool do_telem = false, do_map = false;
+    bool do_telem = false, do_map = false, do_img = false;
 
     g_data_mutex.lock();
     if (g_telem_updated) {
@@ -628,11 +768,17 @@ void loop() {
         do_map       = true;
         g_map_updated = false;
     }
+    if (g_img_updated) {
+        // g_map_raw est deja le tampon cible : pas de copie necessaire.
+        do_img        = true;
+        g_img_updated = false;
+    }
     g_data_mutex.unlock();
 
     // ── Apply pending LVGL updates (no mutex held) ──
     if (do_telem) apply_telem_update(local_telem);
     if (do_map)   apply_map_update(local_map);
+    if (do_img)   apply_map_image();
 
     // ── Drive LVGL rendering and touch events ──
     lv_timer_handler();
