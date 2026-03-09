@@ -32,9 +32,9 @@ def extract_tank_data(d):
     """
     Extracts relevant data for ground vehicles.
     Keys confirmed for tanks via /indicators endpoint.
-    Note: 'speed' is in m/s, converted to km/h by multiplying by 3.6.
+    Note: 'speed' is already in km/h in the War Thunder API response.
     """
-    speed_kmh  = abs(d.get("speed", 0)) * 3.6
+    speed_kmh  = abs(d.get("speed", 0))
     rpm        = d.get("rpm", 0)
     gear       = d.get("gear", "?")
     ammo       = int(d.get("first_stage_ammo", 0))
