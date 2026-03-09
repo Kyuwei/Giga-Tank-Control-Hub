@@ -12,6 +12,7 @@ USBKeyboard Keyboard;
 // ===== ECRANS =====
 lv_obj_t * screen_buttons;
 lv_obj_t * screen_telem;
+lv_obj_t * screen_map;
 
 // ===== WIDGETS GLOBAUX =====
 lv_obj_t * hud_label_btn;
@@ -20,6 +21,20 @@ lv_obj_t * telem_rpm;
 lv_obj_t * telem_gear;
 lv_obj_t * telem_raw;
 lv_obj_t * telem_status;
+
+// ===== CARTE =====
+// Maximum number of map entities displayed simultaneously.
+#define MAP_MAX_ENT  20
+// Dot size in pixels (circle diameter).
+#define MAP_ENT_SIZE 12
+// Inner dimensions of the map container (pixels).
+#define MAP_CONT_W   740
+#define MAP_CONT_H   325
+
+static lv_obj_t * map_name_label;
+static lv_obj_t * map_wait_label;
+static lv_obj_t * map_container;
+static lv_obj_t * map_dots[MAP_MAX_ENT];
 
 // ===== COULEURS =====
 lv_color_t COL_DANGER;
@@ -38,11 +53,15 @@ static void cb_moteur(lv_event_t * e)      { Keyboard.printf("i"); }
 static void cb_reparation(lv_event_t * e)  { Keyboard.printf("f"); }
 
 // ===== SWITCH D'ECRANS =====
+// LVGL 9: lv_scr_load_anim -> lv_screen_load_anim
 static void cb_goto_telem(lv_event_t * e) {
-    lv_scr_load_anim(screen_telem, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300, 0, false);
+    lv_screen_load_anim(screen_telem, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300, 0, false);
 }
 static void cb_goto_buttons(lv_event_t * e) {
-    lv_scr_load_anim(screen_buttons, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 300, 0, false);
+    lv_screen_load_anim(screen_buttons, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 300, 0, false);
+}
+static void cb_goto_map(lv_event_t * e) {
+    lv_screen_load_anim(screen_map, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300, 0, false);
 }
 
 // ===== FEEDBACK VISUEL =====
@@ -59,8 +78,9 @@ static void btn_visual_cb(lv_event_t * e) {
 }
 
 // ===== CREATION BOUTON =====
+// LVGL 9: lv_coord_t removed, use int32_t
 void make_btn(lv_obj_t * parent, const char* icon, const char* label,
-              lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h,
+              int32_t x, int32_t y, int32_t w, int32_t h,
               lv_event_cb_t hid_cb, lv_color_t * color) {
 
     lv_obj_t * btn = lv_btn_create(parent);
@@ -96,13 +116,28 @@ void make_hud_bar(lv_obj_t * parent, lv_obj_t ** label_out) {
     lv_obj_set_style_bg_color(bar, COL_BAR, LV_PART_MAIN);
     lv_obj_set_style_border_width(bar, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(bar, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    // LVGL 9: lv_obj_clear_flag -> lv_obj_remove_flag
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
     *label_out = lv_label_create(bar);
     lv_label_set_text(*label_out, "AWAITING TELEMETRY...");
     lv_obj_set_style_text_color(*label_out, lv_color_hex(0x00FF00), LV_PART_MAIN);
     lv_obj_set_style_text_font(*label_out, &lv_font_montserrat_14, LV_PART_MAIN);
+    // Cap width so the label doesn't overlap the two nav buttons on the right.
+    lv_obj_set_width(*label_out, 465);
+    lv_label_set_long_mode(*label_out, LV_LABEL_LONG_DOT);
     lv_obj_align(*label_out, LV_ALIGN_LEFT_MID, 10, 0);
+}
+
+// ===== COULEUR ENTITE CARTE =====
+static lv_color_t color_for_type(char t) {
+    switch (t) {
+        case 'A': return lv_color_hex(0x00CC00);  // Vert  - allié
+        case 'E': return lv_color_hex(0xFF2200);  // Rouge - ennemi
+        case 'O': return lv_color_hex(0xFFCC00);  // Jaune - objectif
+        case 'F': return lv_color_hex(0x555555);  // Gris  - aerodrome
+        default:  return lv_color_hex(0x777777);  // Gris clair - inconnu
+    }
 }
 
 // ===== ECRAN 1 : COMMANDES =====
@@ -110,20 +145,33 @@ void build_screen_buttons() {
     lv_obj_set_style_bg_color(screen_buttons, COL_DARK, LV_PART_MAIN);
     make_hud_bar(screen_buttons, &hud_label_btn);
 
-    lv_obj_t * btn_nav = lv_btn_create(screen_buttons);
-    lv_obj_set_pos(btn_nav, 645, 6);
-    lv_obj_set_size(btn_nav, 148, 38);
-    lv_obj_set_style_bg_color(btn_nav, lv_color_hex(0x00552A), LV_PART_MAIN);
-    lv_obj_set_style_radius(btn_nav, 6, LV_PART_MAIN);
-    lv_obj_add_event_cb(btn_nav, cb_goto_telem, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * nav_lbl = lv_label_create(btn_nav);
-    lv_label_set_text(nav_lbl, LV_SYMBOL_RIGHT " TELEMETRY");
-    lv_obj_set_style_text_font(nav_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_center(nav_lbl);
+    // TELEMETRY button (repositioned to leave room for the new CARTE button)
+    lv_obj_t * btn_telem = lv_btn_create(screen_buttons);
+    lv_obj_set_pos(btn_telem, 488, 6);
+    lv_obj_set_size(btn_telem, 147, 38);
+    lv_obj_set_style_bg_color(btn_telem, lv_color_hex(0x00552A), LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_telem, 6, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_telem, cb_goto_telem, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * telem_lbl = lv_label_create(btn_telem);
+    lv_label_set_text(telem_lbl, LV_SYMBOL_RIGHT " TELEMETRY");
+    lv_obj_set_style_text_font(telem_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(telem_lbl);
 
-    int W = 228, H = 178;
-    int Y1 = 60, Y2 = 255;
-    int X1 = 12, X2 = 252, X3 = 492;
+    // CARTE button (new — leads to Screen 3)
+    lv_obj_t * btn_carte = lv_btn_create(screen_buttons);
+    lv_obj_set_pos(btn_carte, 643, 6);
+    lv_obj_set_size(btn_carte, 150, 38);
+    lv_obj_set_style_bg_color(btn_carte, lv_color_hex(0x004466), LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_carte, 6, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_carte, cb_goto_map, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * carte_lbl = lv_label_create(btn_carte);
+    lv_label_set_text(carte_lbl, LV_SYMBOL_GPS " CARTE");
+    lv_obj_set_style_text_font(carte_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(carte_lbl);
+
+    int32_t W = 228, H = 178;
+    int32_t Y1 = 60, Y2 = 255;
+    int32_t X1 = 12, X2 = 252, X3 = 492;
 
     make_btn(screen_buttons, LV_SYMBOL_WARNING,  "EXTINCTEUR [6]", X1, Y1, W, H, cb_extincteur, &COL_DANGER);
     make_btn(screen_buttons, LV_SYMBOL_WIFI,     "FUMIGENE [G]",   X2, Y1, W, H, cb_fumigene,   &COL_ARMOR);
@@ -148,8 +196,9 @@ void build_screen_buttons() {
 }
 
 // ===== HELPER BLOC TELEMETRIE =====
+// LVGL 9: lv_coord_t removed, use int32_t
 void make_data_block(lv_obj_t * parent, const char* title_str, lv_obj_t ** val_label,
-                     lv_coord_t x, lv_coord_t y) {
+                     int32_t x, int32_t y) {
     lv_obj_t * box = lv_obj_create(parent);
     lv_obj_set_size(box, 220, 110);
     lv_obj_set_pos(box, x, y);
@@ -157,7 +206,8 @@ void make_data_block(lv_obj_t * parent, const char* title_str, lv_obj_t ** val_l
     lv_obj_set_style_border_color(box, lv_color_hex(0x00FF00), LV_PART_MAIN);
     lv_obj_set_style_border_width(box, 2, LV_PART_MAIN);
     lv_obj_set_style_radius(box, 8, LV_PART_MAIN);
-    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    // LVGL 9: lv_obj_clear_flag -> lv_obj_remove_flag
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t * ttl = lv_label_create(box);
     lv_label_set_text(ttl, title_str);
@@ -224,7 +274,78 @@ void build_screen_telem() {
     lv_obj_center(back_lbl);
 }
 
-// ===== PARSING SERIAL =====
+// ===== ECRAN 3 : CARTE TACTIQUE =====
+void build_screen_map() {
+    lv_obj_set_style_bg_color(screen_map, COL_DARK, LV_PART_MAIN);
+
+    lv_obj_t * title = lv_label_create(screen_map);
+    lv_label_set_text(title, "[ CARTE TACTIQUE - WAR THUNDER ]");
+    lv_obj_set_style_text_color(title, lv_color_hex(0x00FF00), LV_PART_MAIN);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 30, 10);
+
+    map_name_label = lv_label_create(screen_map);
+    lv_label_set_text(map_name_label, "---");
+    lv_obj_set_style_text_color(map_name_label, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_set_style_text_font(map_name_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(map_name_label, LV_ALIGN_TOP_RIGHT, -30, 10);
+
+    lv_obj_t * sep = lv_obj_create(screen_map);
+    lv_obj_set_size(sep, 780, 2);
+    lv_obj_set_style_bg_color(sep, lv_color_hex(0x00FF00), LV_PART_MAIN);
+    lv_obj_set_style_border_width(sep, 0, LV_PART_MAIN);
+    lv_obj_align(sep, LV_ALIGN_TOP_MID, 0, 35);
+
+    // Map display container — dots are positioned inside relative to (0,0) top-left.
+    map_container = lv_obj_create(screen_map);
+    lv_obj_set_size(map_container, MAP_CONT_W, MAP_CONT_H);
+    lv_obj_set_pos(map_container, 30, 44);
+    lv_obj_set_style_bg_color(map_container, lv_color_hex(0x060F06), LV_PART_MAIN);
+    lv_obj_set_style_border_color(map_container, lv_color_hex(0x00AA00), LV_PART_MAIN);
+    lv_obj_set_style_border_width(map_container, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(map_container, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(map_container, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(map_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Waiting placeholder shown until the first map message arrives.
+    map_wait_label = lv_label_create(map_container);
+    lv_label_set_text(map_wait_label, "En attente de donnees carte...");
+    lv_obj_set_style_text_color(map_wait_label, lv_color_hex(0x334433), LV_PART_MAIN);
+    lv_obj_set_style_text_font(map_wait_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(map_wait_label);
+
+    // Pre-allocate dot pool (all hidden at startup, shown/repositioned on map update).
+    for (int i = 0; i < MAP_MAX_ENT; i++) {
+        map_dots[i] = lv_obj_create(map_container);
+        lv_obj_set_size(map_dots[i], MAP_ENT_SIZE, MAP_ENT_SIZE);
+        lv_obj_set_style_radius(map_dots[i], LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_border_width(map_dots[i], 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(map_dots[i], 0, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(map_dots[i], lv_color_hex(0x888888), LV_PART_MAIN);
+        lv_obj_add_flag(map_dots[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(map_dots[i], 0, 0);
+    }
+
+    // Legend
+    lv_obj_t * legend = lv_label_create(screen_map);
+    lv_label_set_text(legend, "  A Allie   E Ennemi   O Objectif   F Aerodrome");
+    lv_obj_set_style_text_color(legend, lv_color_hex(0x445544), LV_PART_MAIN);
+    lv_obj_set_style_text_font(legend, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(legend, 30, 376);
+
+    lv_obj_t * btn_back = lv_btn_create(screen_map);
+    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_set_size(btn_back, 300, 50);
+    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x552200), LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_back, 8, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_back, cb_goto_buttons, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT " PANNEAU DE COMMANDES");
+    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(back_lbl);
+}
+
+// ===== PARSING SERIAL - TELEMETRIE =====
 void parse_and_update(String data) {
     int idx_spd  = data.indexOf("SPD:");
     int idx_tank = data.indexOf("TANK:");
@@ -271,10 +392,81 @@ void parse_and_update(String data) {
     }
 }
 
+// ===== PARSING SERIAL - CARTE =====
+// Expected format: MAPNAME:{name}|MAPOBJ:{x},{y},{type};...
+// Position values are normalized floats in [0.0, 1.0].
+// Type codes: A=allié, E=ennemi, O=objectif, F=aerodrome, N=autre.
+void parse_map_update(String data) {
+    // Extract map name
+    int idx_name = data.indexOf("MAPNAME:");
+    if (idx_name >= 0) {
+        int name_start = idx_name + 8;
+        int name_end   = data.indexOf("|", name_start);
+        String map_name = (name_end >= 0)
+            ? data.substring(name_start, name_end)
+            : data.substring(name_start);
+        lv_label_set_text(map_name_label, map_name.c_str());
+    }
+
+    // Extract object list
+    int idx_obj = data.indexOf("MAPOBJ:");
+    if (idx_obj < 0) return;
+    String obj_str = data.substring(idx_obj + 7);
+
+    // Hide all dots
+    for (int i = 0; i < MAP_MAX_ENT; i++) {
+        lv_obj_add_flag(map_dots[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (obj_str == "-" || obj_str.length() == 0) {
+        return;
+    }
+
+    // Hide the "waiting" placeholder once real data has arrived
+    lv_obj_add_flag(map_wait_label, LV_OBJ_FLAG_HIDDEN);
+
+    // Parse each semicolon-separated entity: x,y,type
+    int ent_idx = 0;
+    int start   = 0;
+    while (ent_idx < MAP_MAX_ENT) {
+        int sep = obj_str.indexOf(';', start);
+        String ent = (sep >= 0) ? obj_str.substring(start, sep)
+                                : obj_str.substring(start);
+
+        int c1 = ent.indexOf(',');
+        int c2 = (c1 >= 0) ? ent.indexOf(',', c1 + 1) : -1;
+        if (c1 < 0 || c2 < 0 || c2 + 1 >= (int)ent.length()) {
+            if (sep < 0) break;
+            start = sep + 1;
+            continue;
+        }
+
+        float nx = ent.substring(0, c1).toFloat();
+        float ny = ent.substring(c1 + 1, c2).toFloat();
+        char  t  = ent.charAt(c2 + 1);
+
+        // Map [0,1] → pixel position inside the container, clamped to valid range.
+        const int32_t max_px = MAP_CONT_W - MAP_ENT_SIZE;
+        const int32_t max_py = MAP_CONT_H - MAP_ENT_SIZE;
+        int32_t px = (int32_t)(nx * max_px);
+        int32_t py = (int32_t)(ny * max_py);
+        if (px < 0) px = 0; else if (px > max_px) px = max_px;
+        if (py < 0) py = 0; else if (py > max_py) py = max_py;
+
+        lv_obj_set_pos(map_dots[ent_idx], px, py);
+        lv_obj_set_style_bg_color(map_dots[ent_idx], color_for_type(t), LV_PART_MAIN);
+        lv_obj_remove_flag(map_dots[ent_idx], LV_OBJ_FLAG_HIDDEN);
+
+        ent_idx++;
+        if (sep < 0) break;
+        start = sep + 1;
+    }
+}
+
 // ===== SERIAL INPUT BUFFER =====
 static String serialBuffer = "";
-// Maximum expected message length; longer partial frames are discarded.
-static const size_t SERIAL_BUF_MAX = 256;
+// Increased to 512 to accommodate the larger MAPNAME/MAPOBJ messages.
+static const size_t SERIAL_BUF_MAX = 512;
 
 // ===== SETUP =====
 void setup() {
@@ -292,11 +484,14 @@ void setup() {
 
     screen_buttons = lv_obj_create(NULL);
     screen_telem   = lv_obj_create(NULL);
+    screen_map     = lv_obj_create(NULL);
 
     build_screen_buttons();
     build_screen_telem();
+    build_screen_map();
 
-    lv_scr_load(screen_buttons);
+    // LVGL 9: lv_scr_load -> lv_screen_load
+    lv_screen_load(screen_buttons);
 }
 
 // ===== LOOP =====
@@ -309,7 +504,12 @@ void loop() {
         if (c == '\n') {
             serialBuffer.trim();
             if (serialBuffer.length() > 0) {
-                parse_and_update(serialBuffer);
+                // Route to the appropriate parser based on message prefix.
+                if (serialBuffer.startsWith("MAPNAME:")) {
+                    parse_map_update(serialBuffer);
+                } else {
+                    parse_and_update(serialBuffer);
+                }
             }
             serialBuffer = "";
         } else {
@@ -321,5 +521,7 @@ void loop() {
             }
         }
     }
-    lv_timer_handler_run_in_period(5);
+    // LVGL 9: lv_timer_handler_run_in_period removed; lv_timer_handler() handles
+    // its own rate-limiting internally — safe to call on every iteration.
+    lv_timer_handler();
 }
