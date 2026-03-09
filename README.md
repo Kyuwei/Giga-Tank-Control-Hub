@@ -13,9 +13,10 @@
 
 Ce projet transforme un **Arduino GIGA R1 WiFi** équipé de son **GIGA Display Shield** (écran tactile 800×480 px) en un véritable panneau de commande de char, inspiré des systèmes de contrôle embarqués des chars modernes (M1A2 Abrams, Leopard 2, etc.).
 
-L'Arduino est reconnu par Windows comme un **clavier USB HID natif** (plug & play, sans driver). L'interface LVGL propose **deux écrans** :
+L'Arduino est reconnu par Windows comme un **clavier USB HID natif** (plug & play, sans driver). L'interface LVGL propose **trois écrans** :
 - **Écran 1 — Commandes** : 6 gros boutons tactiles + 1 bouton Réparation pour déclencher les raccourcis clavier du jeu.
 - **Écran 2 — Télémétrie** : Affichage en temps réel des données du véhicule (vitesse, RPM, rapport, équipage) lues depuis l'API locale de War Thunder via un script Python.
+- **Écran 3 — Carte Tactique** : Affichage en temps réel des objets de la minimap (alliés, ennemis, objectifs, aérodromes) sous forme de points colorés sur fond sombre.
 
 ---
 
@@ -84,7 +85,7 @@ Avant de flasher quoi que ce soit, configurez la répartition de la mémoire fla
 3. Dans le gestionnaire de bibliothèques, installez :
    - `Arduino_H7_Video`
    - `Arduino_GigaDisplayTouch`
-   - `lvgl` (version 8.x recommandée)
+   - `lvgl` (**version 9.5 requise**)
    - `PluggableUSBHID` (incluse dans le pack Mbed)
    - `RPC` (incluse dans le pack Mbed — communication inter-cœur)
 
@@ -123,7 +124,7 @@ python pc_bridge/wt_telemetry.py
 1. Branchez l'Arduino GIGA en USB-C sur votre PC.
 2. Lancez War Thunder et entrez dans une partie ou un essai de véhicule avec un **char**.
 3. Lancez le script Python.
-4. L'écran principal affiche le panneau de commandes. Appuyez sur **TELEMETRY** (haut droite) pour voir les données en direct.
+4. L'écran principal affiche le panneau de commandes. Appuyez sur **TELEMETRY** (haut droite) pour voir les données en direct, ou sur **CARTE** (haut droite, à côté de TELEMETRY) pour voir la carte tactique en temps réel.
 
 ---
 
@@ -341,7 +342,9 @@ with open('map.jpg', 'wb') as f:
 
 ## 🔧 Format du protocole Serial (Arduino <-> Python)
 
-Le script Python envoie des lignes texte sur le port serie au format :
+Le script Python envoie deux types de lignes texte sur le port série.
+
+### Message télémétrie (10 Hz)
 
 ```
 SPD:{int}|RPM:{int}|GEAR:{val}|AMMO:{int}|STAB:{0/1}|CREW:{n}/{total}|TANK:{nom}|STATUS:{0/1}
@@ -354,6 +357,29 @@ SPD:42|RPM:2100|GEAR:4.0|AMMO:18|STAB:1|CREW:4/4|TANK:US_M1A2_ABRAMS|STATUS:1
 
 L'Arduino parse cette chaine dans `parse_and_update()` et met a jour l'interface LVGL en consequence.
 
+### Message carte (2 Hz)
+
+```
+MAPNAME:{nom}|MAPOBJ:{x},{y},{type};{x},{y},{type};...
+```
+
+Les positions `x` et `y` sont des flottants normalises entre 0.0 et 1.0. Le champ `{type}` est un caractère unique :
+
+| Code | Signification | Couleur |
+|------|--------------|---------|
+| `A`  | Allié        | Vert    |
+| `E`  | Ennemi       | Rouge   |
+| `O`  | Objectif / zone de capture | Jaune |
+| `F`  | Aérodrome    | Gris    |
+| `N`  | Autre        | Gris clair |
+
+**Exemple :**
+```
+MAPNAME:MAP42|MAPOBJ:0.52,0.48,A;0.30,0.65,E;0.70,0.20,O
+```
+
+L'Arduino parse cette chaine dans `parse_map_update()` et repositionne les points sur l'ecran Carte.
+
 ---
 
 ## 🖥️ Interface - Apercu
@@ -364,11 +390,22 @@ L'Arduino parse cette chaine dans `parse_and_update()` et met a jour l'interface
 - 6 boutons tactiles de couleurs militaires (Olive Drab, Rouge Danger, Gris Acier)
 - Bouton REPARATION vertical sur la droite
 - Bouton **TELEMETRY** (haut droite) -> transition animee vers l'ecran 2
+- Bouton **CARTE** (haut droite, adjacent a TELEMETRY) -> transition animee vers l'ecran 3
 
 ### Ecran 2 - Telemetrie
 - Indicateur de connexion `[OK] PC BRIDGE: ONLINE` (vert) / `[!!] OFFLINE` (rouge)
 - 3 blocs de donnees : Vitesse, RPM, Rapport
 - Flux brut de donnees en bas
+- Bouton retour vers l'ecran 1
+
+### Ecran 3 - Carte Tactique
+- Zone de carte 740×325 px sur fond sombre
+- Points colores mis a jour en temps reel (2 Hz via script Python) :
+  - **Vert** — Allié
+  - **Rouge** — Ennemi
+  - **Jaune** — Objectif / zone de capture
+  - **Gris** — Aérodrome
+- Nom de la carte (identifiant) affiché en haut à droite
 - Bouton retour vers l'ecran 1
 
 ---
