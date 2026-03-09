@@ -873,9 +873,6 @@ void setup() {
     Display.begin();
     TouchDetector.begin();
 
-    // Initialise le canal RPC M7 ↔ M4 (demarre le M4 et ouvre la communication).
-    RPC.begin();
-
     COL_DANGER = lv_color_hex(0x8B0000);
     COL_ARMOR  = lv_color_hex(0x4A5D23);
     COL_TECH   = lv_color_hex(0x2F4F4F);
@@ -893,11 +890,19 @@ void setup() {
     // LVGL 9: lv_scr_load -> lv_screen_load
     lv_screen_load(screen_buttons);
 
+    // Initialise le canal RPC M7 ↔ M4 après la construction complète de l'interface LVGL.
+    // RPC.begin() démarre le M4 et initialise les files VirtIO OpenAMP depuis le tas Mbed
+    // partagé avec LVGL. Un appel anticipé (avant les lv_obj_create) fragmentait ce tas et
+    // empêchait LVGL d'allouer ses objets/styles → crash au milieu de build_screen_buttons().
+    // Le thread série n'utilise pas RPC ; seul loop() lit les messages "CPU4:" du M4, donc
+    // RPC n'a pas besoin d'être initialisé avant le lancement des threads.
+    RPC.begin();
+
     // Start the serial-reader thread (M4-equivalent role).
     // It runs independently, never touching LVGL.
     g_serial_thread.start(serial_task);
 
-    // Thread d'inactivite : estime la charge CPU M7 (priorite minimale).
+    // Thread de mesure CPU : estime la charge M7 à priorité basse.
     g_cpu_idle_thread.start(cpu_idle_task);
 }
 
