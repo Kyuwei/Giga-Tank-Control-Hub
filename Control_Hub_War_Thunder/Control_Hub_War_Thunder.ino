@@ -1,8 +1,33 @@
+// ============================================================
+// Control_Hub_War_Thunder — Cortex-M7 main sketch
+// Target core : Main Core  (Tools → Target Core → Main Core)
+//
+// Dual-core overview:
+//   This sketch runs on the M7 and owns the display (LVGL), the USB HID
+//   keyboard, and the USB Serial connection to the Python bridge.
+//   It boots the M4 co-processor via RPC.begin() and delegates all
+//   telemetry parsing to it:
+//
+//     1. Raw telemetry lines from Serial (Python) are forwarded to the M4
+//        with RPC.println().
+//     2. The M4 parses each line and sends back a compact "PARSED|…" frame
+//        over the same bidirectional RPC stream.
+//     3. apply_parsed() reads those frames and updates the LVGL widgets.
+//
+//   See Control_Hub_M4/Control_Hub_M4.ino for the co-processor sketch.
+//
+// Flash split (Arduino IDE → Tools → Flash Split):
+//   "1MB M7 + 1MB M4"  or  "1.5MB M7 + 0.5MB M4"
+//   Upload the M7 sketch first, then switch to M4 Co-processor and upload
+//   Control_Hub_M4.ino.
+// ============================================================
+
 #include "Arduino_H7_Video.h"
 #include "Arduino_GigaDisplayTouch.h"
 #include "lvgl.h"
 #include "PluggableUSBHID.h"
 #include "USBKeyboard.h"
+#include "RPC.h"
 
 // ===== HARDWARE =====
 Arduino_H7_Video Display(800, 480, GigaDisplayShield);
@@ -224,63 +249,68 @@ void build_screen_telem() {
     lv_obj_center(back_lbl);
 }
 
-// ===== PARSING SERIAL =====
-void parse_and_update(String data) {
-    int idx_spd  = data.indexOf("SPD:");
-    int idx_tank = data.indexOf("TANK:");
-    int idx_crew = data.indexOf("CREW:");
+// ===== APPLY PARSED TELEMETRY FROM M4 =====
+// Receives a structured "PARSED|SPD:<v>|RPM:<v>|GEAR:<v>|STATUS:<0/1>|HUD:<text>"
+// frame sent by the M4 co-processor and updates LVGL widgets accordingly.
+// The HUD field is always last and may contain " | " separators.
+void apply_parsed(const String& data) {
+    if (!data.startsWith("PARSED|")) return;
 
-    if (idx_spd >= 0 && idx_tank >= 0 && idx_crew >= 0) {
-        String spd  = data.substring(idx_spd  + 4, data.indexOf("|", idx_spd));
-        String tank = data.substring(idx_tank + 5, data.indexOf("|", idx_tank));
-        String crew = data.substring(idx_crew + 5, data.indexOf("|", idx_crew));
-        String hud  = tank + " | " + spd + " km/h | CREW:" + crew;
-        lv_label_set_text(hud_label_btn, hud.c_str());
+    // Helper: find "|KEY:" and return everything up to the next "|"
+    // (or end of string). Returns "" when the key is absent.
+    auto extract = [&](const char* delim, int delimLen) -> String {
+        int i = data.indexOf(delim);
+        if (i < 0) return "";
+        int end = data.indexOf("|", i + delimLen);
+        return data.substring(i + delimLen, end < 0 ? (int)data.length() : end);
+    };
+
+    String spd  = extract("|SPD:",  5);
+    String rpm  = extract("|RPM:",  5);
+    String gear = extract("|GEAR:", 6);
+
+    if (spd.length()  > 0) lv_label_set_text(telem_spd,  (spd + " km/h").c_str());
+    if (rpm.length()  > 0) lv_label_set_text(telem_rpm,  rpm.c_str());
+    if (gear.length() > 0) lv_label_set_text(telem_gear, gear.c_str());
+
+    // Status field: "1" = online, "0" = offline.
+    // Any other value (including "-1" when M4 found no STATUS field in the
+    // raw data) is intentionally ignored so the widget keeps its last state.
+    String statusVal = extract("|STATUS:", 8);
+    if (statusVal == "1") {
+        lv_label_set_text(telem_status, "[OK] PC BRIDGE: ONLINE");
+        lv_obj_set_style_text_color(telem_status, lv_color_hex(0x00FF00), LV_PART_MAIN);
+    } else if (statusVal == "0") {
+        lv_label_set_text(telem_status, "[!!] PC BRIDGE: OFFLINE");
+        lv_obj_set_style_text_color(telem_status, lv_color_hex(0xFF3300), LV_PART_MAIN);
     }
 
-    int idx_status = data.indexOf("STATUS:");
-    if (idx_status >= 0) {
-        String status = data.substring(idx_status + 7);
-        status.trim();
-        if (status.startsWith("1")) {
-            lv_label_set_text(telem_status, "[OK] PC BRIDGE: ONLINE");
-            lv_obj_set_style_text_color(telem_status, lv_color_hex(0x00FF00), LV_PART_MAIN);
-        } else {
-            lv_label_set_text(telem_status, "[!!] PC BRIDGE: OFFLINE");
-            lv_obj_set_style_text_color(telem_status, lv_color_hex(0xFF3300), LV_PART_MAIN);
-        }
-    }
-
-    lv_label_set_text(telem_raw, data.c_str());
-
-    int idx;
-    idx = data.indexOf("SPD:");
-    if (idx >= 0) {
-        String val = data.substring(idx + 4, data.indexOf("|", idx));
-        lv_label_set_text(telem_spd, (val + " km/h").c_str());
-    }
-    idx = data.indexOf("RPM:");
-    if (idx >= 0) {
-        String val = data.substring(idx + 4, data.indexOf("|", idx));
-        lv_label_set_text(telem_rpm, val.c_str());
-    }
-    idx = data.indexOf("GEAR:");
-    if (idx >= 0) {
-        String val = data.substring(idx + 5, data.indexOf("|", idx));
-        lv_label_set_text(telem_gear, val.c_str());
+    // HUD text is always the last field; take everything after "|HUD:"
+    int hudIdx = data.indexOf("|HUD:");
+    if (hudIdx >= 0) {
+        String hud = data.substring(hudIdx + 5);
+        if (hud.length() > 0) lv_label_set_text(hud_label_btn, hud.c_str());
     }
 }
 
-// ===== SERIAL INPUT BUFFER =====
+// ===== SERIAL INPUT BUFFER (USB Serial → M7) =====
 static String serialBuffer = "";
 // Maximum expected message length; longer partial frames are discarded.
 static const size_t SERIAL_BUF_MAX = 256;
+
+// ===== RPC RECEIVE BUFFER (M4 → M7 parsed frames) =====
+static String rpcRecvBuffer = "";
+static const size_t RPC_RECV_BUF_MAX = 512;
 
 // ===== SETUP =====
 void setup() {
     Serial.begin(115200);
     Serial.setTimeout(100);  // Keep timeout short; non-blocking loop does the real work
-    serialBuffer.reserve(SERIAL_BUF_MAX);  // Pre-allocate to avoid repeated heap allocations
+    serialBuffer.reserve(SERIAL_BUF_MAX);      // Pre-allocate to avoid repeated heap allocations
+    rpcRecvBuffer.reserve(RPC_RECV_BUF_MAX);
+
+    RPC.begin();  // Boot the M4 co-processor and initialise the inter-core RPC channel
+
     Display.begin();
     TouchDetector.begin();
 
@@ -301,15 +331,18 @@ void setup() {
 
 // ===== LOOP =====
 void loop() {
-    // Non-blocking serial read: accumulate characters until '\n' so that
-    // lv_timer_handler() is always called promptly and the receive buffer
-    // never stalls while waiting for a newline.
+    // ── USB Serial → M4 ──────────────────────────────────────────────────────
+    // Non-blocking serial read: accumulate characters until '\n'.
+    // Each complete line is:
+    //   (a) displayed immediately in the raw-data widget, and
+    //   (b) forwarded to the M4 co-processor for parsing via the RPC stream.
     while (Serial.available()) {
         char c = (char)Serial.read();
         if (c == '\n') {
             serialBuffer.trim();
             if (serialBuffer.length() > 0) {
-                parse_and_update(serialBuffer);
+                lv_label_set_text(telem_raw, serialBuffer.c_str());  // Immediate raw display
+                RPC.println(serialBuffer);  // Delegate parsing to M4
             }
             serialBuffer = "";
         } else {
@@ -321,5 +354,27 @@ void loop() {
             }
         }
     }
+
+    // ── M4 → M7: apply parsed telemetry ──────────────────────────────────────
+    // The M4 sends back "PARSED|…" frames over the RPC stream after parsing
+    // each raw line.  We accumulate them the same way as the Serial input and
+    // call apply_parsed() once a complete frame is received.
+    while (RPC.available()) {
+        char c = (char)RPC.read();
+        if (c == '\n') {
+            rpcRecvBuffer.trim();
+            if (rpcRecvBuffer.length() > 0) {
+                apply_parsed(rpcRecvBuffer);
+            }
+            rpcRecvBuffer = "";
+        } else {
+            if (rpcRecvBuffer.length() < RPC_RECV_BUF_MAX) {
+                rpcRecvBuffer += c;
+            } else {
+                rpcRecvBuffer = "";  // Drop oversized frame
+            }
+        }
+    }
+
     lv_timer_handler_run_in_period(5);
 }
