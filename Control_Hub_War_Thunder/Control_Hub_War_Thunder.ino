@@ -139,9 +139,13 @@ static rtos::Thread g_serial_thread(osPriorityHigh, 8192);
 // g_m4_load_pct est recu depuis le M4 via RPC.
 static volatile uint32_t g_m7_load_pct = 0;
 static volatile uint32_t g_m4_load_pct = 0;
-// Thread d'inactivite a priorite minimale : compte ses iterations par seconde.
-// La proportion de temps qu'il obtient reflete le temps CPU non utilise par M7.
-static rtos::Thread g_cpu_idle_thread(osPriorityIdle, 512);
+// Thread de mesure CPU a priorite basse : compte ses iterations par seconde.
+// Il tourne lorsque les threads Normal/High sont en attente (delay, mutex, I/O).
+// Stack 2048 octets : le Cortex-M7 avec FPU utilise ~136 octets par frame d'exception ;
+// avec plusieurs IRQ imbriquees, 512 octets etait insuffisant et provoquait un HardFault.
+// osPriorityIdle est reserve au thread idle interne de Mbed OS ; on utilise
+// osPriorityLow pour eviter tout conflit avec ce thread systeme.
+static rtos::Thread g_cpu_idle_thread(osPriorityLow, 2048);
 
 // ===== COULEURS =====
 lv_color_t COL_DANGER;
@@ -640,10 +644,10 @@ static void ammo_blink_cb(lv_timer_t * t) {
     }
 }
 
-// ===== THREAD D'INACTIVITE M7 (estimation charge CPU M7) =====
-// Priorite minimale : ce thread ne s'execute QUE lorsque tous les autres threads sont
-// bloques/en attente. Il compte ses iterations par fenetre d'une seconde.
-// Charge M7 (%) = (1 - iterations_mesurees / iterations_max_observe) * 100
+// ===== THREAD DE MESURE CPU M7 (osPriorityLow, 2048 o) =====
+// Ce thread tourne quand les threads High (serial) et Normal (loop) sont en attente
+// (delay, mutex, I/O). Il compte ses iterations sur une fenetre d'une seconde.
+// Charge M7 (%) ≈ (1 - iterations_mesurees / iterations_max_observe) * 100
 static void cpu_idle_task() {
     uint32_t max_ticks = 0;
     while (true) {
