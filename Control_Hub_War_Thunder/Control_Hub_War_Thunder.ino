@@ -43,10 +43,16 @@ lv_obj_t * screen_map;
 // ===== WIDGETS GLOBAUX =====
 lv_obj_t * hud_label_btn;
 lv_obj_t * telem_spd;
-lv_obj_t * telem_rpm;
-lv_obj_t * telem_gear;
+lv_obj_t * telem_ammo;
+lv_obj_t * telem_crew_val;
 lv_obj_t * telem_raw;
 lv_obj_t * telem_status;
+lv_obj_t * telem_cpu_m7;
+lv_obj_t * telem_cpu_m4;
+
+// ===== ALERTE AMMO (timer de clignotement) =====
+static lv_timer_t * g_ammo_blink_timer = NULL;
+static bool         g_ammo_blink_on    = false;
 
 // ===== CARTE =====
 // Maximum number of map entities displayed simultaneously.
@@ -59,15 +65,15 @@ lv_obj_t * telem_status;
 
 // ===== IMAGE D'ARRIERE-PLAN CARTE =====
 // Dimensions de l'image RGB565 recue du PC (doit correspondre a MAP_IMG_W/H dans wt_telemetry.py).
-// 148 × 5 = 740 = MAP_CONT_W, 65 × 5 = 325 = MAP_CONT_H → echelle 5× exacte, aucun rognage.
-#define MAP_RAW_W      148
-#define MAP_RAW_H      65
-// Facteur d'echelle LVGL : 256 = 100%, donc 5× = 1280.
-#define MAP_BG_SCALE   1280
+// 296 × 2.5 = 740 = MAP_CONT_W, 130 × 2.5 = 325 = MAP_CONT_H → echelle 2.5× exacte.
+#define MAP_RAW_W      296
+#define MAP_RAW_H      130
+// Facteur d'echelle LVGL : 256 = 100%, donc 2.5× = 640.
+#define MAP_BG_SCALE   640
 // Taille du tampon RGB565 en octets (2 octets par pixel).
 #define MAP_RAW_BYTES  (MAP_RAW_W * MAP_RAW_H * 2)
 // Taille max du payload base64 (ceil(MAP_RAW_BYTES × 4 / 3) + marge de securite).
-#define MAP_B64_MAX    26000
+#define MAP_B64_MAX    110000
 
 // Assure la compatibilite si LV_IMAGE_HEADER_MAGIC n'est pas expose par la version Arduino de LVGL.
 #ifndef LV_IMAGE_HEADER_MAGIC
@@ -128,6 +134,15 @@ static volatile bool g_map_updated   = false;
 // 8 KB stack fits Arduino String temporaries and parse buffers.
 static rtos::Thread g_serial_thread(osPriorityHigh, 8192);
 
+// ===== CHARGE CPU (M7 + M4) =====
+// g_m7_load_pct est mis a jour par le thread d'inactivite (ci-dessous).
+// g_m4_load_pct est recu depuis le M4 via RPC.
+static volatile uint32_t g_m7_load_pct = 0;
+static volatile uint32_t g_m4_load_pct = 0;
+// Thread d'inactivite a priorite minimale : compte ses iterations par seconde.
+// La proportion de temps qu'il obtient reflete le temps CPU non utilise par M7.
+static rtos::Thread g_cpu_idle_thread(osPriorityIdle, 512);
+
 // ===== COULEURS =====
 lv_color_t COL_DANGER;
 lv_color_t COL_ARMOR;
@@ -136,13 +151,19 @@ lv_color_t COL_DARK;
 lv_color_t COL_BAR;
 
 // ===== CALLBACKS HID =====
-static void cb_extincteur(lv_event_t * e)  { Keyboard.printf("6"); }
-static void cb_fumigene(lv_event_t * e)    { Keyboard.printf("g"); }
-static void cb_artillerie(lv_event_t * e)  { Keyboard.printf("5"); }
-static void cb_jumelles(lv_event_t * e)    { Keyboard.printf("b"); }
-static void cb_sniper(lv_event_t * e)      { Keyboard.key_code(KEY_SHIFT); }
-static void cb_moteur(lv_event_t * e)      { Keyboard.printf("i"); }
-static void cb_reparation(lv_event_t * e)  { Keyboard.printf("f"); }
+// Les callbacks positionnent un drapeau ; la boucle principale envoie le rapport HID
+// apres lv_timer_handler(), ce qui laisse ensuite delay(5) au stack USB pour transmettre
+// la trame — correction du probleme "1 appui sur 20 ignore".
+static volatile char    g_hid_char    = '\0';  // '\0' = aucune action en attente
+static volatile uint8_t g_hid_keycode = 0;     //  0   = aucun keycode en attente
+
+static void cb_extincteur(lv_event_t * e)  { g_hid_char = '6'; }
+static void cb_fumigene(lv_event_t * e)    { g_hid_char = 'g'; }
+static void cb_artillerie(lv_event_t * e)  { g_hid_char = '5'; }
+static void cb_jumelles(lv_event_t * e)    { g_hid_char = 'b'; }
+static void cb_sniper(lv_event_t * e)      { g_hid_keycode = KEY_SHIFT; }
+static void cb_moteur(lv_event_t * e)      { g_hid_char = 'i'; }
+static void cb_reparation(lv_event_t * e)  { g_hid_char = 'f'; }
 
 // ===== SWITCH D'ECRANS =====
 // LVGL 9: lv_scr_load_anim -> lv_screen_load_anim
@@ -377,9 +398,22 @@ void build_screen_telem() {
     lv_obj_set_style_text_font(telem_status, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(telem_status, LV_ALIGN_TOP_LEFT, 30, 55);
 
-    make_data_block(screen_telem, "VITESSE (km/h)", &telem_spd,  30,  110);
-    make_data_block(screen_telem, "REGIME (RPM)",   &telem_rpm,  290, 110);
-    make_data_block(screen_telem, "RAPPORT",        &telem_gear, 550, 110);
+    // Charge CPU M7 (haut gauche) et M4 (haut droite)
+    telem_cpu_m7 = lv_label_create(screen_telem);
+    lv_label_set_text(telem_cpu_m7, "M7: --%");
+    lv_obj_set_style_text_color(telem_cpu_m7, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_set_style_text_font(telem_cpu_m7, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(telem_cpu_m7, LV_ALIGN_TOP_LEFT, 30, 78);
+
+    telem_cpu_m4 = lv_label_create(screen_telem);
+    lv_label_set_text(telem_cpu_m4, "M4: --%");
+    lv_obj_set_style_text_color(telem_cpu_m4, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_set_style_text_font(telem_cpu_m4, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(telem_cpu_m4, LV_ALIGN_TOP_RIGHT, -30, 78);
+
+    make_data_block(screen_telem, "VITESSE (km/h)", &telem_spd,      30,  110);
+    make_data_block(screen_telem, "OBUS RESTANTS",  &telem_ammo,     290, 110);
+    make_data_block(screen_telem, "EQUIPAGE",       &telem_crew_val, 550, 110);
 
     lv_obj_t * raw_title = lv_label_create(screen_telem);
     lv_label_set_text(raw_title, "RAW DATA STREAM:");
@@ -528,6 +562,9 @@ static void parse_telem_string(const String& data, TelemShared& out) {
         snprintf(out.tank, sizeof(out.tank), "UNKNOWN");
     }
 
+    idx = data.indexOf("AMMO:");
+    out.ammo = (idx >= 0) ? data.substring(idx + 5, data.indexOf("|", idx)).toInt() : 0;
+
     out.crew = 0; out.crew_total = 0;
     idx = data.indexOf("CREW:");
     if (idx >= 0) {
@@ -591,6 +628,38 @@ static void parse_map_string(const String& data, MapShared& out) {
     }
 }
 
+// ===== CALLBACK CLIGNOTEMENT ALERTE AMMO (main/M7 thread uniquement) =====
+// Appele par un lv_timer toutes les 500 ms quand ammo <= 5.
+// Fait clignoter la couleur du contour de la case OBUS RESTANTS.
+static void ammo_blink_cb(lv_timer_t * t) {
+    g_ammo_blink_on = !g_ammo_blink_on;
+    lv_obj_t * box = lv_obj_get_parent(telem_ammo);
+    if (box) {
+        lv_color_t brd = g_ammo_blink_on ? lv_color_hex(0xFF0000) : lv_color_hex(0x660000);
+        lv_obj_set_style_border_color(box, brd, LV_PART_MAIN);
+    }
+}
+
+// ===== THREAD D'INACTIVITE M7 (estimation charge CPU M7) =====
+// Priorite minimale : ce thread ne s'execute QUE lorsque tous les autres threads sont
+// bloques/en attente. Il compte ses iterations par fenetre d'une seconde.
+// Charge M7 (%) = (1 - iterations_mesurees / iterations_max_observe) * 100
+static void cpu_idle_task() {
+    uint32_t max_ticks = 0;
+    while (true) {
+        uint32_t t0 = millis();
+        uint32_t n  = 0;
+        while ((millis() - t0) < 1000) ++n;
+        if (n > max_ticks) max_ticks = n;   // Mise a jour du maximum historique
+        if (max_ticks > 0) {
+            int32_t load = 100 - (int32_t)((n * 100UL) / max_ticks);
+            if (load < 0) load = 0;
+            if (load > 100) load = 100;
+            g_m7_load_pct = (uint32_t)load;
+        }
+    }
+}
+
 // ===== LVGL UPDATE - TELEMETRIE (main/M7 thread only) =====
 // Reads a local copy of TelemShared (no mutex held) and updates LVGL widgets.
 static void apply_telem_update(const TelemShared& d) {
@@ -610,11 +679,59 @@ static void apply_telem_update(const TelemShared& d) {
     snprintf(buf, sizeof(buf), "%d km/h", d.spd);
     lv_label_set_text(telem_spd, buf);
 
-    snprintf(buf, sizeof(buf), "%d", d.rpm);
-    lv_label_set_text(telem_rpm, buf);
+    // ── Obus restants ──
+    snprintf(buf, sizeof(buf), "%d", d.ammo);
+    lv_label_set_text(telem_ammo, buf);
+    lv_obj_t * ammo_box = lv_obj_get_parent(telem_ammo);
+    if (ammo_box) {
+        if (d.online && d.ammo <= 5) {
+            // Alerte : fond rouge, contour plus epais, texte rouge, clignotement
+            lv_obj_set_style_bg_color(ammo_box,     lv_color_hex(0x3A0000), LV_PART_MAIN);
+            lv_obj_set_style_border_color(ammo_box, lv_color_hex(0xFF0000), LV_PART_MAIN);
+            lv_obj_set_style_border_width(ammo_box, 4,                      LV_PART_MAIN);
+            lv_obj_set_style_text_color(telem_ammo, lv_color_hex(0xFF4444), LV_PART_MAIN);
+            if (g_ammo_blink_timer == NULL) {
+                g_ammo_blink_timer = lv_timer_create(ammo_blink_cb, 500, NULL);
+            }
+        } else {
+            // Normal : vert
+            lv_obj_set_style_bg_color(ammo_box,     lv_color_hex(0x1C2C1C), LV_PART_MAIN);
+            lv_obj_set_style_border_color(ammo_box, lv_color_hex(0x00FF00), LV_PART_MAIN);
+            lv_obj_set_style_border_width(ammo_box, 2,                      LV_PART_MAIN);
+            lv_obj_set_style_text_color(telem_ammo, lv_color_hex(0x00FF00), LV_PART_MAIN);
+            if (g_ammo_blink_timer != NULL) {
+                lv_timer_delete(g_ammo_blink_timer);
+                g_ammo_blink_timer = NULL;
+                g_ammo_blink_on    = false;
+            }
+        }
+    }
 
-    lv_label_set_text(telem_gear, d.gear);
-    lv_label_set_text(telem_raw,  d.raw);
+    // ── Equipage ──
+    snprintf(buf, sizeof(buf), "%d/%d", d.crew, d.crew_total);
+    lv_label_set_text(telem_crew_val, buf);
+    lv_obj_t * crew_box = lv_obj_get_parent(telem_crew_val);
+    if (crew_box) {
+        if (d.online && d.crew_total > 0 && d.crew <= 2) {
+            // Alerte : fond rouge, contour rouge, texte rouge
+            lv_obj_set_style_bg_color(crew_box,         lv_color_hex(0x3A0000), LV_PART_MAIN);
+            lv_obj_set_style_border_color(crew_box,     lv_color_hex(0xFF0000), LV_PART_MAIN);
+            lv_obj_set_style_text_color(telem_crew_val, lv_color_hex(0xFF4444), LV_PART_MAIN);
+        } else {
+            // Normal : vert
+            lv_obj_set_style_bg_color(crew_box,         lv_color_hex(0x1C2C1C), LV_PART_MAIN);
+            lv_obj_set_style_border_color(crew_box,     lv_color_hex(0x00FF00), LV_PART_MAIN);
+            lv_obj_set_style_text_color(telem_crew_val, lv_color_hex(0x00FF00), LV_PART_MAIN);
+        }
+    }
+
+    // ── Charge CPU ──
+    snprintf(buf, sizeof(buf), "M7: %lu%%", g_m7_load_pct);
+    lv_label_set_text(telem_cpu_m7, buf);
+    snprintf(buf, sizeof(buf), "M4: %lu%%", g_m4_load_pct);
+    lv_label_set_text(telem_cpu_m4, buf);
+
+    lv_label_set_text(telem_raw, d.raw);
 }
 
 // ===== LVGL UPDATE - CARTE (main/M7 thread only) =====
@@ -673,7 +790,7 @@ void serial_task() {
 
     // Tampon statique dedie au payload base64 des messages MAPRAW:
     // Alloue en BSS (static) pour ne pas saturer les 8 KB de stack du thread.
-    static uint8_t s_b64buf[MAP_B64_MAX];
+    static uint8_t s_b64buf[MAP_B64_MAX];  // 110 000 bytes en BSS
     static size_t  s_b64len   = 0;
     static bool    s_in_image = false;   // true = on accumule un payload MAPRAW:
 
@@ -752,6 +869,9 @@ void setup() {
     Display.begin();
     TouchDetector.begin();
 
+    // Initialise le canal RPC M7 ↔ M4 (demarre le M4 et ouvre la communication).
+    RPC.begin();
+
     COL_DANGER = lv_color_hex(0x8B0000);
     COL_ARMOR  = lv_color_hex(0x4A5D23);
     COL_TECH   = lv_color_hex(0x2F4F4F);
@@ -772,15 +892,34 @@ void setup() {
     // Start the serial-reader thread (M4-equivalent role).
     // It runs independently, never touching LVGL.
     g_serial_thread.start(serial_task);
+
+    // Thread d'inactivite : estime la charge CPU M7 (priorite minimale).
+    g_cpu_idle_thread.start(cpu_idle_task);
 }
 
 // ===== LOOP (role M7 : rendu & tactile) =====
 // The loop exclusively drives LVGL and USB-HID.
 // It reads pre-parsed data from the shared structs under a brief mutex lock,
 // then applies any pending updates to LVGL widgets — all without blocking on
-// serial I/O. delay(5) yields CPU to the USB stack, which is why HID button
-// presses are reliably delivered to the PC.
+// serial I/O. delay(5) yields CPU to the USB stack after any HID send, which
+// guarantees that HID button presses are reliably delivered to the PC.
 void loop() {
+    // ── Lecture RPC : charge CPU M4 envoyee par le co-processeur ──
+    while (RPC.available()) {
+        char c = (char)RPC.read();
+        if (c == '\n') {
+            rpcRecvBuffer.trim();
+            if (rpcRecvBuffer.startsWith("CPU4:")) {
+                uint32_t pct = (uint32_t)rpcRecvBuffer.substring(5).toInt();
+                if (pct <= 100) g_m4_load_pct = pct;
+            }
+            rpcRecvBuffer = "";
+        } else {
+            if (rpcRecvBuffer.length() < RPC_RECV_BUF_MAX) rpcRecvBuffer += c;
+            else rpcRecvBuffer = "";
+        }
+    }
+
     // ── Snapshot shared data under mutex (critical section is a struct copy only) ──
     static TelemShared local_telem;
     static MapShared   local_map;
@@ -812,8 +951,20 @@ void loop() {
     // ── Drive LVGL rendering and touch events ──
     lv_timer_handler();
 
+    // ── Envoi HID differe (apres lv_timer_handler) ──
+    // Les callbacks LVGL positionnent un drapeau ; on envoie ici, AVANT delay(5),
+    // pour que le stack USB dispose immediatement de 5 ms pour transmettre la trame.
+    // C'est la correction du probleme "1 appui sur 20 ignore".
+    if (g_hid_char != '\0') {
+        char c = g_hid_char;
+        g_hid_char = '\0';
+        Keyboard.printf("%c", c);
+    } else if (g_hid_keycode != 0) {
+        uint8_t kc = g_hid_keycode;
+        g_hid_keycode = 0;
+        Keyboard.key_code(kc);
+    }
+
     // ── Yield to USB stack and other Mbed RTOS tasks ──
-    // 5 ms gives the USB HID endpoint time to flush between button presses,
-    // eliminating the "1-in-20" missed-keypress issue.
     delay(5);
 }

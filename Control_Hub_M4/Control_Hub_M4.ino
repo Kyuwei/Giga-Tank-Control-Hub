@@ -9,6 +9,11 @@
 //   LVGL display without performing any string operations in its
 //   time-critical rendering loop.
 //
+//   En plus du parsing, le M4 mesure sa propre charge CPU et envoie
+//   periodiquement un message "CPU4:{pct}\n" au M7 (une fois par seconde).
+//   La charge est calculee comme le pourcentage de temps passe a traiter
+//   des donnees RPC par rapport a la fenetre d'une seconde.
+//
 // Wiring / flash split:
 //   Set Tools → Flash Split to "1MB M7 + 1MB M4" (or "1.5MB M7 + 0.5MB M4")
 //   before uploading either sketch.  Upload the M7 sketch first, then
@@ -19,6 +24,8 @@
 //                     the M7 sends it with RPC.println().
 //   M4 → M7 (parsed): "PARSED|SPD:<v>|RPM:<v>|GEAR:<v>|STATUS:<0/1>|HUD:<text>"
 //                     HUD is always the last field and may contain " | ".
+//   M4 → M7 (cpu)   : "CPU4:<pct>\n"  — charge CPU M4 en pourcentage (0-100),
+//                     envoyee une fois par seconde.
 // ============================================================
 
 #include "RPC.h"
@@ -26,6 +33,10 @@
 // ===== RECEIVE BUFFER (raw data arriving from M7) =====
 static String rpcBuffer = "";
 static const size_t RPC_BUF_MAX = 256;
+
+// ===== MESURE CHARGE CPU M4 =====
+static uint32_t m4_busy_us  = 0;   // microsecondes passees a traiter des donnees RPC
+static uint32_t m4_t_window = 0;   // millis au debut de la fenetre de mesure courante
 
 // ===== HELPERS =====
 // Extracts the value of a key:value field delimited by '|'.
@@ -79,27 +90,47 @@ static String parse_telemetry(const String& data) {
 void setup() {
     RPC.begin();
     rpcBuffer.reserve(RPC_BUF_MAX);
+    m4_t_window = millis();
 }
 
 // ===== LOOP =====
 void loop() {
-    // Read raw telemetry lines forwarded by M7 over the RPC stream.
-    // Accumulate characters until '\n', then parse and reply.
-    while (RPC.available()) {
-        char c = (char)RPC.read();
-        if (c == '\n') {
-            rpcBuffer.trim();
-            if (rpcBuffer.length() > 0) {
-                String result = parse_telemetry(rpcBuffer);
-                RPC.println(result);
-            }
-            rpcBuffer = "";
-        } else {
-            if (rpcBuffer.length() < RPC_BUF_MAX) {
-                rpcBuffer += c;
+    uint32_t now_ms = millis();
+
+    // ── Lecture et traitement des donnees RPC (M7 → M4) ──
+    // Le temps passe ici est mesure pour le calcul de charge CPU.
+    if (RPC.available()) {
+        uint32_t t0 = micros();
+        do {
+            char c = (char)RPC.read();
+            if (c == '\n') {
+                rpcBuffer.trim();
+                if (rpcBuffer.length() > 0) {
+                    String result = parse_telemetry(rpcBuffer);
+                    RPC.println(result);
+                }
+                rpcBuffer = "";
             } else {
-                rpcBuffer = "";  // Discard runaway frame
+                if (rpcBuffer.length() < RPC_BUF_MAX) {
+                    rpcBuffer += c;
+                } else {
+                    rpcBuffer = "";  // Discard runaway frame
+                }
             }
-        }
+        } while (RPC.available());
+        m4_busy_us += micros() - t0;
+    }
+
+    // ── Envoi periodique de la charge CPU M4 au M7 (une fois par seconde) ──
+    if (now_ms - m4_t_window >= 1000) {
+        uint32_t elapsed_ms = now_ms - m4_t_window;
+        // load% = busy_us / (elapsed_ms * 1000) * 100 = busy_us / (elapsed_ms * 10)
+        uint32_t load_pct = m4_busy_us / (elapsed_ms * 10);
+        if (load_pct > 100) load_pct = 100;
+        m4_busy_us  = 0;
+        m4_t_window = now_ms;
+        RPC.print("CPU4:");
+        RPC.print((int)load_pct);
+        RPC.print('\n');
     }
 }
