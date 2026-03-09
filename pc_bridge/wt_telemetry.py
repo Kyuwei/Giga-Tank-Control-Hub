@@ -10,8 +10,8 @@ WT_MAP_INFO    = "http://127.0.0.1:8111/map_info.json"
 
 # Maximum number of map entities sent per message (mirrors MAP_MAX_ENT in the .ino).
 MAX_MAP_ENTITIES = 20
-# Send a map update every MAP_INTERVAL main-loop iterations (10 Hz ÷ 5 = 2 Hz).
-MAP_INTERVAL = 5
+# Send a map update every MAP_INTERVAL main-loop iterations (10 Hz ÷ 2 = 5 Hz).
+MAP_INTERVAL = 2
 
 def find_arduino_port():
     """Detects the Arduino GIGA R1 serial port automatically."""

@@ -3,6 +3,7 @@
 #include "lvgl.h"
 #include "PluggableUSBHID.h"
 #include "USBKeyboard.h"
+#include "mbed.h"
 
 // ===== HARDWARE =====
 Arduino_H7_Video Display(800, 480, GigaDisplayShield);
@@ -35,6 +36,46 @@ static lv_obj_t * map_name_label;
 static lv_obj_t * map_wait_label;
 static lv_obj_t * map_container;
 static lv_obj_t * map_dots[MAP_MAX_ENT];
+
+// ===== DONNEES PARTAGEES (thread serial <-> thread LVGL/M7) =====
+// All fields written by the serial thread and read by the main loop.
+// Access is protected by g_data_mutex. LVGL is NEVER called from the
+// serial thread; it only writes plain POD data to these structs.
+
+struct TelemShared {
+    int  spd;
+    int  rpm;
+    char gear[8];
+    int  ammo;
+    int  stab;
+    int  crew;
+    int  crew_total;
+    char tank[48];
+    bool online;
+    char raw[256];   // full raw line for the RAW DATA STREAM label
+};
+
+struct MapEntShared {
+    float x;
+    float y;
+    char  type;      // 'A'=allié 'E'=ennemi 'O'=objectif 'F'=aerodrome 'N'=autre
+};
+
+struct MapShared {
+    char         name[16];
+    MapEntShared ents[MAP_MAX_ENT];
+    int          count;
+};
+
+static TelemShared   g_telem;
+static MapShared     g_map;
+static rtos::Mutex   g_data_mutex;           // guards g_telem + g_map
+static volatile bool g_telem_updated = false;
+static volatile bool g_map_updated   = false;
+
+// Serial-reader thread (Mbed RTOS — M4-equivalent role).
+// 8 KB stack fits Arduino String temporaries and parse buffers.
+static rtos::Thread g_serial_thread(osPriorityHigh, 8192);
 
 // ===== COULEURS =====
 lv_color_t COL_DANGER;
@@ -345,94 +386,85 @@ void build_screen_map() {
     lv_obj_center(back_lbl);
 }
 
-// ===== PARSING SERIAL - TELEMETRIE =====
-void parse_and_update(String data) {
-    int idx_spd  = data.indexOf("SPD:");
-    int idx_tank = data.indexOf("TANK:");
-    int idx_crew = data.indexOf("CREW:");
+// ===== PARSING SERIAL - TELEMETRIE (serial thread, no LVGL) =====
+// Fills *out* from a raw telemetry line.  Must NOT call any lv_* function.
+// Expected format: SPD:{int}|RPM:{int}|GEAR:{val}|...|STATUS:{0/1}
+static void parse_telem_string(const String& data, TelemShared& out) {
+    // Store raw line for the telemetry debug label
+    data.toCharArray(out.raw, sizeof(out.raw) - 1);
+    out.raw[sizeof(out.raw) - 1] = '\0';
 
-    if (idx_spd >= 0 && idx_tank >= 0 && idx_crew >= 0) {
-        String spd  = data.substring(idx_spd  + 4, data.indexOf("|", idx_spd));
-        String tank = data.substring(idx_tank + 5, data.indexOf("|", idx_tank));
-        String crew = data.substring(idx_crew + 5, data.indexOf("|", idx_crew));
-        String hud  = tank + " | " + spd + " km/h | CREW:" + crew;
-        lv_label_set_text(hud_label_btn, hud.c_str());
+    int idx;
+
+    idx = data.indexOf("SPD:");
+    out.spd = (idx >= 0) ? data.substring(idx + 4, data.indexOf("|", idx)).toInt() : 0;
+
+    idx = data.indexOf("RPM:");
+    out.rpm = (idx >= 0) ? data.substring(idx + 4, data.indexOf("|", idx)).toInt() : 0;
+
+    idx = data.indexOf("GEAR:");
+    if (idx >= 0) {
+        String g = data.substring(idx + 5, data.indexOf("|", idx));
+        g.toCharArray(out.gear, sizeof(out.gear));
+    } else {
+        snprintf(out.gear, sizeof(out.gear), "---");
     }
 
-    int idx_status = data.indexOf("STATUS:");
-    if (idx_status >= 0) {
-        String status = data.substring(idx_status + 7);
-        status.trim();
-        if (status.startsWith("1")) {
-            lv_label_set_text(telem_status, "[OK] PC BRIDGE: ONLINE");
-            lv_obj_set_style_text_color(telem_status, lv_color_hex(0x00FF00), LV_PART_MAIN);
-        } else {
-            lv_label_set_text(telem_status, "[!!] PC BRIDGE: OFFLINE");
-            lv_obj_set_style_text_color(telem_status, lv_color_hex(0xFF3300), LV_PART_MAIN);
+    idx = data.indexOf("TANK:");
+    if (idx >= 0) {
+        String t = data.substring(idx + 5, data.indexOf("|", idx));
+        t.toCharArray(out.tank, sizeof(out.tank));
+    } else {
+        snprintf(out.tank, sizeof(out.tank), "UNKNOWN");
+    }
+
+    out.crew = 0; out.crew_total = 0;
+    idx = data.indexOf("CREW:");
+    if (idx >= 0) {
+        String c = data.substring(idx + 5, data.indexOf("|", idx));
+        int sl = c.indexOf('/');
+        if (sl >= 0) {
+            out.crew       = c.substring(0, sl).toInt();
+            out.crew_total = c.substring(sl + 1).toInt();
         }
     }
 
-    lv_label_set_text(telem_raw, data.c_str());
-
-    int idx;
-    idx = data.indexOf("SPD:");
+    idx = data.indexOf("STATUS:");
     if (idx >= 0) {
-        String val = data.substring(idx + 4, data.indexOf("|", idx));
-        lv_label_set_text(telem_spd, (val + " km/h").c_str());
-    }
-    idx = data.indexOf("RPM:");
-    if (idx >= 0) {
-        String val = data.substring(idx + 4, data.indexOf("|", idx));
-        lv_label_set_text(telem_rpm, val.c_str());
-    }
-    idx = data.indexOf("GEAR:");
-    if (idx >= 0) {
-        String val = data.substring(idx + 5, data.indexOf("|", idx));
-        lv_label_set_text(telem_gear, val.c_str());
+        String s = data.substring(idx + 7);
+        s.trim();
+        out.online = s.startsWith("1");
+    } else {
+        out.online = false;
     }
 }
 
-// ===== PARSING SERIAL - CARTE =====
+// ===== PARSING SERIAL - CARTE (serial thread, no LVGL) =====
+// Fills *out* from a MAPNAME/MAPOBJ line.  Must NOT call any lv_* function.
 // Expected format: MAPNAME:{name}|MAPOBJ:{x},{y},{type};...
-// Position values are normalized floats in [0.0, 1.0].
 // Type codes: A=allié, E=ennemi, O=objectif, F=aerodrome, N=autre.
-void parse_map_update(String data) {
-    // Extract map name
+static void parse_map_string(const String& data, MapShared& out) {
+    out.count    = 0;
+    out.name[0]  = '\0';
+
     int idx_name = data.indexOf("MAPNAME:");
     if (idx_name >= 0) {
-        int name_start = idx_name + 8;
-        int name_end   = data.indexOf("|", name_start);
-        String map_name = (name_end >= 0)
-            ? data.substring(name_start, name_end)
-            : data.substring(name_start);
-        lv_label_set_text(map_name_label, map_name.c_str());
+        int ns = idx_name + 8;
+        int ne = data.indexOf("|", ns);
+        String mn = (ne >= 0) ? data.substring(ns, ne) : data.substring(ns);
+        mn.toCharArray(out.name, sizeof(out.name));
     }
 
-    // Extract object list
     int idx_obj = data.indexOf("MAPOBJ:");
     if (idx_obj < 0) return;
     String obj_str = data.substring(idx_obj + 7);
+    if (obj_str == "-" || obj_str.length() == 0) return;
 
-    // Hide all dots
-    for (int i = 0; i < MAP_MAX_ENT; i++) {
-        lv_obj_add_flag(map_dots[i], LV_OBJ_FLAG_HIDDEN);
-    }
-
-    if (obj_str == "-" || obj_str.length() == 0) {
-        return;
-    }
-
-    // Hide the "waiting" placeholder once real data has arrived
-    lv_obj_add_flag(map_wait_label, LV_OBJ_FLAG_HIDDEN);
-
-    // Parse each semicolon-separated entity: x,y,type
-    int ent_idx = 0;
-    int start   = 0;
-    while (ent_idx < MAP_MAX_ENT) {
-        int sep = obj_str.indexOf(';', start);
+    int start = 0;
+    while (out.count < MAP_MAX_ENT) {
+        int sep    = obj_str.indexOf(';', start);
         String ent = (sep >= 0) ? obj_str.substring(start, sep)
                                 : obj_str.substring(start);
-
         int c1 = ent.indexOf(',');
         int c2 = (c1 >= 0) ? ent.indexOf(',', c1 + 1) : -1;
         if (c1 < 0 || c2 < 0 || c2 + 1 >= (int)ent.length()) {
@@ -440,39 +472,114 @@ void parse_map_update(String data) {
             start = sep + 1;
             continue;
         }
-
-        float nx = ent.substring(0, c1).toFloat();
-        float ny = ent.substring(c1 + 1, c2).toFloat();
-        char  t  = ent.charAt(c2 + 1);
-
-        // Map [0,1] → pixel position inside the container, clamped to valid range.
-        const int32_t max_px = MAP_CONT_W - MAP_ENT_SIZE;
-        const int32_t max_py = MAP_CONT_H - MAP_ENT_SIZE;
-        int32_t px = (int32_t)(nx * max_px);
-        int32_t py = (int32_t)(ny * max_py);
-        if (px < 0) px = 0; else if (px > max_px) px = max_px;
-        if (py < 0) py = 0; else if (py > max_py) py = max_py;
-
-        lv_obj_set_pos(map_dots[ent_idx], px, py);
-        lv_obj_set_style_bg_color(map_dots[ent_idx], color_for_type(t), LV_PART_MAIN);
-        lv_obj_remove_flag(map_dots[ent_idx], LV_OBJ_FLAG_HIDDEN);
-
-        ent_idx++;
+        out.ents[out.count].x    = ent.substring(0, c1).toFloat();
+        out.ents[out.count].y    = ent.substring(c1 + 1, c2).toFloat();
+        out.ents[out.count].type = ent.charAt(c2 + 1);
+        out.count++;
         if (sep < 0) break;
         start = sep + 1;
     }
 }
 
-// ===== SERIAL INPUT BUFFER =====
-static String serialBuffer = "";
-// Increased to 512 to accommodate the larger MAPNAME/MAPOBJ messages.
-static const size_t SERIAL_BUF_MAX = 512;
+// ===== LVGL UPDATE - TELEMETRIE (main/M7 thread only) =====
+// Reads a local copy of TelemShared (no mutex held) and updates LVGL widgets.
+static void apply_telem_update(const TelemShared& d) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%.32s | %d km/h | CREW:%d/%d",
+             d.tank, d.spd, d.crew, d.crew_total);
+    lv_label_set_text(hud_label_btn, buf);
+
+    if (d.online) {
+        lv_label_set_text(telem_status, "[OK] PC BRIDGE: ONLINE");
+        lv_obj_set_style_text_color(telem_status, lv_color_hex(0x00FF00), LV_PART_MAIN);
+    } else {
+        lv_label_set_text(telem_status, "[!!] PC BRIDGE: OFFLINE");
+        lv_obj_set_style_text_color(telem_status, lv_color_hex(0xFF3300), LV_PART_MAIN);
+    }
+
+    snprintf(buf, sizeof(buf), "%d km/h", d.spd);
+    lv_label_set_text(telem_spd, buf);
+
+    snprintf(buf, sizeof(buf), "%d", d.rpm);
+    lv_label_set_text(telem_rpm, buf);
+
+    lv_label_set_text(telem_gear, d.gear);
+    lv_label_set_text(telem_raw,  d.raw);
+}
+
+// ===== LVGL UPDATE - CARTE (main/M7 thread only) =====
+// Reads a local copy of MapShared (no mutex held) and repositions map dots.
+static void apply_map_update(const MapShared& d) {
+    lv_label_set_text(map_name_label, d.name);
+
+    // Hide all dots first
+    for (int i = 0; i < MAP_MAX_ENT; i++) {
+        lv_obj_add_flag(map_dots[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (d.count == 0) return;
+
+    // Hide the "waiting" placeholder once real data has arrived
+    lv_obj_add_flag(map_wait_label, LV_OBJ_FLAG_HIDDEN);
+
+    const int32_t max_px = MAP_CONT_W - MAP_ENT_SIZE;
+    const int32_t max_py = MAP_CONT_H - MAP_ENT_SIZE;
+
+    for (int i = 0; i < d.count && i < MAP_MAX_ENT; i++) {
+        int32_t px = (int32_t)(d.ents[i].x * max_px);
+        int32_t py = (int32_t)(d.ents[i].y * max_py);
+        if (px < 0) px = 0; else if (px > max_px) px = max_px;
+        if (py < 0) py = 0; else if (py > max_py) py = max_py;
+        lv_obj_set_pos(map_dots[i], px, py);
+        lv_obj_set_style_bg_color(map_dots[i], color_for_type(d.ents[i].type), LV_PART_MAIN);
+        lv_obj_remove_flag(map_dots[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// ===== THREAD SERIE (role M4 : donnees & reseau) =====
+// Runs at osPriorityHigh. Reads bytes from Serial, assembles lines, parses
+// them into the shared structs, and signals the main loop via the update
+// flags. LVGL is never touched here.
+void serial_task() {
+    String buf;
+    buf.reserve(512);
+    while (true) {
+        while (Serial.available()) {
+            char c = (char)Serial.read();
+            if (c == '\n') {
+                buf.trim();
+                if (buf.length() > 0) {
+                    if (buf.startsWith("MAPNAME:")) {
+                        // Parse outside the mutex to keep lock time minimal
+                        MapShared local;
+                        parse_map_string(buf, local);
+                        g_data_mutex.lock();
+                        g_map         = local;
+                        g_map_updated = true;
+                        g_data_mutex.unlock();
+                    } else {
+                        TelemShared local;
+                        parse_telem_string(buf, local);
+                        g_data_mutex.lock();
+                        g_telem         = local;
+                        g_telem_updated = true;
+                        g_data_mutex.unlock();
+                    }
+                }
+                buf = "";
+            } else {
+                if ((size_t)buf.length() < 512) buf += c;
+                else                            buf  = "";  // drop runaway frame
+            }
+        }
+        // Yield for 2 ms so the M7 loop and USB stack get CPU time
+        delay(2);
+    }
+}
 
 // ===== SETUP =====
 void setup() {
     Serial.begin(115200);
-    Serial.setTimeout(100);  // Keep timeout short; non-blocking loop does the real work
-    serialBuffer.reserve(SERIAL_BUF_MAX);  // Pre-allocate to avoid repeated heap allocations
+    // No setTimeout needed — the serial thread uses non-blocking reads
     Display.begin();
     TouchDetector.begin();
 
@@ -492,36 +599,46 @@ void setup() {
 
     // LVGL 9: lv_scr_load -> lv_screen_load
     lv_screen_load(screen_buttons);
+
+    // Start the serial-reader thread (M4-equivalent role).
+    // It runs independently, never touching LVGL.
+    g_serial_thread.start(serial_task);
 }
 
-// ===== LOOP =====
+// ===== LOOP (role M7 : rendu & tactile) =====
+// The loop exclusively drives LVGL and USB-HID.
+// It reads pre-parsed data from the shared structs under a brief mutex lock,
+// then applies any pending updates to LVGL widgets — all without blocking on
+// serial I/O. delay(5) yields CPU to the USB stack, which is why HID button
+// presses are reliably delivered to the PC.
 void loop() {
-    // Non-blocking serial read: accumulate characters until '\n' so that
-    // lv_timer_handler() is always called promptly and the receive buffer
-    // never stalls while waiting for a newline.
-    while (Serial.available()) {
-        char c = (char)Serial.read();
-        if (c == '\n') {
-            serialBuffer.trim();
-            if (serialBuffer.length() > 0) {
-                // Route to the appropriate parser based on message prefix.
-                if (serialBuffer.startsWith("MAPNAME:")) {
-                    parse_map_update(serialBuffer);
-                } else {
-                    parse_and_update(serialBuffer);
-                }
-            }
-            serialBuffer = "";
-        } else {
-            // Discard oversized frames to prevent unbounded memory growth
-            if (serialBuffer.length() < SERIAL_BUF_MAX) {
-                serialBuffer += c;
-            } else {
-                serialBuffer = "";  // Drop corrupted/runaway frame
-            }
-        }
+    // ── Snapshot shared data under mutex (critical section is a struct copy only) ──
+    static TelemShared local_telem;
+    static MapShared   local_map;
+    bool do_telem = false, do_map = false;
+
+    g_data_mutex.lock();
+    if (g_telem_updated) {
+        local_telem     = g_telem;
+        do_telem        = true;
+        g_telem_updated = false;
     }
-    // LVGL 9: lv_timer_handler_run_in_period removed; lv_timer_handler() handles
-    // its own rate-limiting internally — safe to call on every iteration.
+    if (g_map_updated) {
+        local_map    = g_map;
+        do_map       = true;
+        g_map_updated = false;
+    }
+    g_data_mutex.unlock();
+
+    // ── Apply pending LVGL updates (no mutex held) ──
+    if (do_telem) apply_telem_update(local_telem);
+    if (do_map)   apply_map_update(local_map);
+
+    // ── Drive LVGL rendering and touch events ──
     lv_timer_handler();
+
+    // ── Yield to USB stack and other Mbed RTOS tasks ──
+    // 5 ms gives the USB HID endpoint time to flush between button presses,
+    // eliminating the "1-in-20" missed-keypress issue.
+    delay(5);
 }
