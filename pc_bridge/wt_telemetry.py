@@ -24,9 +24,9 @@ MAX_MAP_ENTITIES = 20
 # Send a map update every MAP_INTERVAL main-loop iterations (10 Hz ÷ 2 = 5 Hz).
 MAP_INTERVAL = 2
 # Dimensions de l'image envoyee a l'Arduino (doit correspondre a MAP_RAW_W/H dans le .ino).
-# 296 × 2.5 = 740 = MAP_CONT_W, 130 × 2.5 = 325 = MAP_CONT_H → echelle exacte 2.5×.
-MAP_IMG_W = 296
-MAP_IMG_H = 130
+# 185 × 4 = 740 = MAP_CONT_W, 82 × 4 = 328 ≈ MAP_CONT_H → echelle exacte 4×.
+MAP_IMG_W = 185
+MAP_IMG_H = 82
 
 def find_arduino_port():
     """Detects the Arduino GIGA R1 serial port automatically."""
