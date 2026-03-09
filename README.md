@@ -25,10 +25,33 @@ L'Arduino est reconnu par Windows comme un **clavier USB HID natif** (plug & pla
 ```
 Giga-Tank-Control-Hub/
 ├── Control_Hub_War_Thunder/
-│   └── Control_Hub_War_Thunder.ino   <- Code Arduino (LVGL + USB HID)
+│   └── Control_Hub_War_Thunder.ino   <- Sketch M7 (LVGL + USB HID + RPC)
+├── Control_Hub_M4/
+│   └── Control_Hub_M4.ino            <- Sketch M4 (parsing télémétrie + RPC)
 ├── pc_bridge/
 │   └── wt_telemetry.py               <- Script Python (API War Thunder -> Serial)
 └── README.md
+```
+
+### Rôles des deux cœurs
+
+| Cœur | Rôle |
+|---|---|
+| **Cortex-M7** (480 MHz) | Interface LVGL (800×480), clavier USB HID, lecture Serial USB, démarrage du M4 |
+| **Cortex-M4** (240 MHz) | Parsing des trames télémétriques, calcul du texte HUD, renvoi des valeurs structurées au M7 |
+
+**Flux de données :**
+```
+Python bridge
+    │  USB Serial
+    ▼
+  M7 (loop)
+    │  RPC stream (ligne brute)          Raw data affiché immédiatement
+    ▼
+  M4 (loop) — parse_telemetry()
+    │  RPC stream ("PARSED|SPD:…|…")
+    ▼
+  M7 — apply_parsed() → LVGL widgets
 ```
 
 ---
@@ -45,7 +68,17 @@ Giga-Tank-Control-Hub/
 
 ## ⚙️ Installation
 
-### 1. Arduino IDE
+### 1. Flash Split (requis pour le dual-core)
+
+Avant de flasher quoi que ce soit, configurez la répartition de la mémoire flash dans Arduino IDE :
+
+**Arduino IDE → Tools → Flash Split**, puis sélectionnez :
+- **1MB M7 + 1MB M4** (recommandé — partage équilibré)
+- **1.5MB M7 + 0.5MB M4** (si le M7 a besoin de plus d'espace)
+
+> ⚠️ Cette étape est indispensable. Sans Flash Split, le M4 n'a pas d'espace de stockage et ne peut pas être programmé.
+
+### 2. Arduino IDE — Bibliothèques
 
 1. Installez **Arduino IDE 2.x**.
 2. Dans le gestionnaire de cartes, installez : `Arduino Mbed OS Giga Boards`.
@@ -54,11 +87,25 @@ Giga-Tank-Control-Hub/
    - `Arduino_GigaDisplayTouch`
    - `lvgl` (**version 9.5 requise**)
    - `PluggableUSBHID` (incluse dans le pack Mbed)
-4. Ouvrez `Control_Hub_War_Thunder/Control_Hub_War_Thunder.ino`.
-5. Sélectionnez la carte **Arduino GIGA R1 WiFi** et le bon port COM.
-6. Flashez.
+   - `RPC` (incluse dans le pack Mbed — communication inter-cœur)
 
-### 2. Script Python (pont télémétrique)
+### 3. Upload du sketch M7 (cœur principal)
+
+1. **Tools → Target Core → Main Core**
+2. Ouvrez `Control_Hub_War_Thunder/Control_Hub_War_Thunder.ino`.
+3. Sélectionnez la carte **Arduino GIGA R1 WiFi** et le bon port COM.
+4. Flashez.
+
+### 4. Upload du sketch M4 (co-processeur)
+
+1. **Tools → Target Core → M4 Co-processor**
+2. Ouvrez `Control_Hub_M4/Control_Hub_M4.ino`.
+3. Sélectionnez la même carte et le même port COM.
+4. Flashez.
+
+> Le M7 démarre automatiquement le M4 via `RPC.begin()` au démarrage. Il n'est pas nécessaire de re-flasher le M7 après avoir flashé le M4.
+
+### 5. Script Python (pont télémétrique)
 
 ```bash
 pip install requests pyserial
@@ -124,7 +171,7 @@ Clés disponibles pour les véhicules terrestres (`army: tank`) :
 
 | Clé JSON | Type | Description |
 |---|---|---|
-| `speed` | float (m/s) | Vitesse du véhicule (**x 3.6 pour km/h**) |
+| `speed` | float (m/s) | Vitesse du véhicule |
 | `rpm` | float | Régime moteur en tours/minute |
 | `gear` | float | Rapport de vitesse engagé |
 | `gear_neutral` | float | Valeur du rapport neutre |

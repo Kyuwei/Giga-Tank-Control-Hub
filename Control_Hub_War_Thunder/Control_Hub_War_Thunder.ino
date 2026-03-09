@@ -1,9 +1,34 @@
+// ============================================================
+// Control_Hub_War_Thunder — Cortex-M7 main sketch
+// Target core : Main Core  (Tools → Target Core → Main Core)
+//
+// Dual-core overview:
+//   This sketch runs on the M7 and owns the display (LVGL), the USB HID
+//   keyboard, and the USB Serial connection to the Python bridge.
+//   It boots the M4 co-processor via RPC.begin() and delegates all
+//   telemetry parsing to it:
+//
+//     1. Raw telemetry lines from Serial (Python) are forwarded to the M4
+//        with RPC.println().
+//     2. The M4 parses each line and sends back a compact "PARSED|…" frame
+//        over the same bidirectional RPC stream.
+//     3. apply_parsed() reads those frames and updates the LVGL widgets.
+//
+//   See Control_Hub_M4/Control_Hub_M4.ino for the co-processor sketch.
+//
+// Flash split (Arduino IDE → Tools → Flash Split):
+//   "1MB M7 + 1MB M4"  or  "1.5MB M7 + 0.5MB M4"
+//   Upload the M7 sketch first, then switch to M4 Co-processor and upload
+//   Control_Hub_M4.ino.
+// ============================================================
+
 #include "Arduino_H7_Video.h"
 #include "Arduino_GigaDisplayTouch.h"
 #include "lvgl.h"
 #include "PluggableUSBHID.h"
 #include "USBKeyboard.h"
 #include "mbed.h"
+#include "RPC.h"
 
 // ===== HARDWARE =====
 Arduino_H7_Video Display(800, 480, GigaDisplayShield);
@@ -715,6 +740,10 @@ void serial_task() {
         delay(2);
     }
 }
+
+// ===== RPC RECEIVE BUFFER (M4 → M7 parsed frames) =====
+static String rpcRecvBuffer = "";
+static const size_t RPC_RECV_BUF_MAX = 512;
 
 // ===== SETUP =====
 void setup() {
