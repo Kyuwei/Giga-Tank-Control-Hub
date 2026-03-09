@@ -266,9 +266,16 @@ void parse_and_update(String data) {
     }
 }
 
+// ===== SERIAL INPUT BUFFER =====
+static String serialBuffer = "";
+// Maximum expected message length; longer partial frames are discarded.
+static const size_t SERIAL_BUF_MAX = 256;
+
 // ===== SETUP =====
 void setup() {
     Serial.begin(115200);
+    Serial.setTimeout(100);  // Keep timeout short; non-blocking loop does the real work
+    serialBuffer.reserve(SERIAL_BUF_MAX);  // Pre-allocate to avoid repeated heap allocations
     Display.begin();
     TouchDetector.begin();
 
@@ -289,11 +296,24 @@ void setup() {
 
 // ===== LOOP =====
 void loop() {
-    if (Serial.available()) {
-        String data = Serial.readStringUntil('\n');
-        data.trim();
-        if (data.length() > 0) {
-            parse_and_update(data);
+    // Non-blocking serial read: accumulate characters until '\n' so that
+    // lv_timer_handler() is always called promptly and the receive buffer
+    // never stalls while waiting for a newline.
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == '\n') {
+            serialBuffer.trim();
+            if (serialBuffer.length() > 0) {
+                parse_and_update(serialBuffer);
+            }
+            serialBuffer = "";
+        } else {
+            // Discard oversized frames to prevent unbounded memory growth
+            if (serialBuffer.length() < SERIAL_BUF_MAX) {
+                serialBuffer += c;
+            } else {
+                serialBuffer = "";  // Drop corrupted/runaway frame
+            }
         }
     }
     lv_timer_handler();
