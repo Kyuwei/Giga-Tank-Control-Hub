@@ -123,7 +123,7 @@ Clés disponibles pour les véhicules terrestres (`army: tank`) :
 
 | Clé JSON | Type | Description |
 |---|---|---|
-| `speed` | float (m/s) | Vitesse du véhicule (**x 3.6 pour km/h**) |
+| `speed` | float (m/s) | Vitesse du véhicule |
 | `rpm` | float | Régime moteur en tours/minute |
 | `gear` | float | Rapport de vitesse engagé |
 | `gear_neutral` | float | Valeur du rapport neutre |
