@@ -71,7 +71,7 @@ void make_btn(lv_obj_t * parent, const char* icon, const char* label,
     lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(btn, 18, LV_PART_MAIN);
     lv_obj_set_style_shadow_color(btn, lv_color_hex(0x000000), LV_PART_MAIN);
-    lv_obj_add_event_cb(btn, hid_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn, hid_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(btn, btn_visual_cb, LV_EVENT_ALL, color);
 
     lv_obj_t * ico = lv_label_create(btn);
@@ -134,7 +134,7 @@ void build_screen_buttons() {
     lv_obj_set_size(btn_rep, 58, 373);
     lv_obj_set_style_bg_color(btn_rep, lv_color_hex(0x2a5500), LV_PART_MAIN);
     lv_obj_set_style_radius(btn_rep, 10, LV_PART_MAIN);
-    lv_obj_add_event_cb(btn_rep, cb_reparation, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn_rep, cb_reparation, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(btn_rep, btn_visual_cb, LV_EVENT_ALL, &COL_ARMOR);
     lv_obj_t * rep_lbl = lv_label_create(btn_rep);
     lv_label_set_text(rep_lbl, "REP\nARA\nTION\n[F]");
