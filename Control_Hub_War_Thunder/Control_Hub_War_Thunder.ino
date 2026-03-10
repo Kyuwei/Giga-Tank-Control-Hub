@@ -140,6 +140,7 @@ static lv_obj_t * hud_bridge_lbl    = NULL;  // statut bridge (ecran boutons)
 static lv_obj_t * hud_time_lbl      = NULL;  // horloge HH:MM:SS
 
 // ===== COULEURS =====
+lv_color_t COL_NEON;
 lv_color_t COL_DANGER;
 lv_color_t COL_ARMOR;
 lv_color_t COL_TECH;
@@ -160,6 +161,11 @@ static void cb_jumelles(lv_event_t * e)    { g_pending_hid = 'b'; }
 static void cb_sniper(lv_event_t * e)      { g_pending_hid = '\x01'; }
 static void cb_moteur(lv_event_t * e)      { g_pending_hid = 'i'; }
 static void cb_reparation(lv_event_t * e)  { g_pending_hid = 'f'; }
+static void cb_thermal(lv_event_t * e)     { g_pending_hid = 'n'; }
+static void cb_rangefinder(lv_event_t * e) { g_pending_hid = 'r'; }
+static void cb_track(lv_event_t * e)       { g_pending_hid = 'x'; }
+static void cb_towcable(lv_event_t * e)    { g_pending_hid = '0'; }
+static void cb_arty_coord(lv_event_t * e)  { g_pending_hid = 'm'; }
 
 // ===== SWITCH D'ECRANS =====
 // LVGL 9: lv_scr_load_anim -> lv_screen_load_anim
