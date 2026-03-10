@@ -102,12 +102,13 @@ def extract_tank_data(d):
     stab       = int(d.get("stabilizer", 0))
     crew       = int(d.get("crew_current", 0))
     crew_total = int(d.get("crew_total", 0))
+    fuel       = int(max(0, d.get("fuel", -1)))   # -1 si non disponible dans l'API
 
     # Extract short tank name from model path (e.g. "tankModels/us_m1a2_abrams" -> "US_M1A2_ABRAMS")
     raw_type   = d.get("type", "UNKNOWN")
     tank_name  = raw_type.split("/")[-1].upper() if "/" in raw_type else raw_type.upper()
 
-    return int(speed_kmh), int(rpm), gear, ammo, stab, crew, crew_total, tank_name
+    return int(speed_kmh), int(rpm), gear, ammo, stab, crew, crew_total, tank_name, fuel
 
 def color_to_type(color_str, obj_type_str):
     """
@@ -208,16 +209,16 @@ def main():
         msg = None
         if data and data.get("army") == "tank":
             offline_counter = 0
-            spd, rpm, gear, ammo, stab, crew, crew_total, tank = extract_tank_data(data)
+            spd, rpm, gear, ammo, stab, crew, crew_total, tank, fuel = extract_tank_data(data)
 
             # Compact format parsed by the Arduino
             msg = (f"SPD:{spd}|RPM:{rpm}|GEAR:{gear}"
-                   f"|AMMO:{ammo}|STAB:{stab}"
+                   f"|AMMO:{ammo}|STAB:{stab}|FUEL:{fuel}"
                    f"|CREW:{crew}/{crew_total}|TANK:{tank}|STATUS:1\n")
         else:
             offline_counter += 1
             if offline_counter > 30:
-                msg = "SPD:0|RPM:0|GEAR:-|AMMO:-|STAB:0|CREW:-/-|TANK:OFFLINE|STATUS:0\n"
+                msg = "SPD:0|RPM:0|GEAR:-|AMMO:-|STAB:0|FUEL:-1|CREW:-/-|TANK:OFFLINE|STATUS:0\n"
                 offline_counter = 0
 
         if msg is not None:
