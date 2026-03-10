@@ -46,7 +46,10 @@ def get_indicators():
         r = requests.get(WT_INDICATORS, timeout=0.5)
         if r.status_code == 200:
             return r.json()
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.JSONDecodeError,
+            ValueError):
         pass
     return None
 
@@ -57,7 +60,10 @@ def get_map_data():
         info_r = requests.get(WT_MAP_INFO, timeout=0.5)
         if obj_r.status_code == 200 and info_r.status_code == 200:
             return obj_r.json(), info_r.json()
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.JSONDecodeError,
+            ValueError):
         pass
     return None, None
 
