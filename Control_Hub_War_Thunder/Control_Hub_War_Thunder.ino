@@ -97,12 +97,13 @@ struct TelemShared {
     int  spd;
     int  rpm;
     char gear[8];
-    int  ammo;
-    int  stab;
+    int  ammo;       // munitions 1re soute (-1 = non disponible)
+    int  stab;       // stabilisateur actif
     int  crew;
     int  crew_total;
     char tank[48];
     bool online;
+    int  fuel;       // carburant en % (-1 = non disponible)
     char raw[256];   // full raw line for the RAW DATA STREAM label
 };
 
@@ -127,6 +128,16 @@ static volatile bool g_map_updated   = false;
 // Serial-reader thread (Mbed RTOS — M4-equivalent role).
 // 8 KB stack fits Arduino String temporaries and parse buffers.
 static rtos::Thread g_serial_thread(osPriorityHigh, 8192);
+
+// ===== WIDGETS VEHICULE STATUS (ecran 2) =====
+static lv_obj_t * telem_crew_bar    = NULL;  // barre progression equipage
+static lv_obj_t * telem_crew_count  = NULL;  // label "3/4"
+static lv_obj_t * telem_ammo_lbl    = NULL;  // label compteur munitions
+static lv_obj_t * telem_ammo_bar    = NULL;  // barre munitions
+static lv_obj_t * telem_fuel_lbl    = NULL;  // label carburant
+// ===== WIDGETS HUD ECRAN PRINCIPAL =====
+static lv_obj_t * hud_bridge_lbl    = NULL;  // statut bridge (ecran boutons)
+static lv_obj_t * hud_time_lbl      = NULL;  // horloge HH:MM:SS
 
 // ===== COULEURS =====
 lv_color_t COL_DANGER;
@@ -175,33 +186,37 @@ static void btn_visual_cb(lv_event_t * e) {
     }
 }
 
-// ===== CREATION BOUTON =====
-// LVGL 9: lv_coord_t removed, use int32_t
+// ===== CREATION BOUTON MFD (style Figma) =====
+// is_alert=true  → bordure/texte rouge  (SMOKE, ARTILLERIE)
+// is_alert=false → bordure/texte vert neon
 void make_btn(lv_obj_t * parent, const char* icon, const char* label,
               int32_t x, int32_t y, int32_t w, int32_t h,
-              lv_event_cb_t hid_cb, lv_color_t * color) {
+              lv_event_cb_t hid_cb, bool is_alert) {
+
+    lv_color_t fg  = is_alert ? lv_color_hex(0xEF4444) : COL_NEON;
+    lv_color_t bg  = is_alert ? lv_color_hex(0x1A0000) : lv_color_hex(0x0A1A0A);
+    lv_color_t prb = is_alert ? lv_color_hex(0x4A0000) : lv_color_hex(0x103310);
 
     lv_obj_t * btn = lv_btn_create(parent);
     lv_obj_set_pos(btn, x, y);
     lv_obj_set_size(btn, w, h);
-    lv_obj_set_style_bg_color(btn, *color, LV_PART_MAIN);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x111111), LV_PART_MAIN);
-    lv_obj_set_style_border_width(btn, 5, LV_PART_MAIN);
-    lv_obj_set_style_radius(btn, 10, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(btn, 18, LV_PART_MAIN);
-    lv_obj_set_style_shadow_color(btn, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, bg,  LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(btn, prb, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, fg, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn, 4, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
     lv_obj_add_event_cb(btn, hid_cb, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(btn, btn_visual_cb, LV_EVENT_PRESSED,    color);
-    lv_obj_add_event_cb(btn, btn_visual_cb, LV_EVENT_RELEASED,   color);
-    lv_obj_add_event_cb(btn, btn_visual_cb, LV_EVENT_PRESS_LOST, color);
 
     lv_obj_t * ico = lv_label_create(btn);
     lv_label_set_text(ico, icon);
+    lv_obj_set_style_text_color(ico, fg, LV_PART_MAIN);
     lv_obj_set_style_text_font(ico, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(ico, LV_ALIGN_CENTER, 0, -18);
 
     lv_obj_t * lbl = lv_label_create(btn);
     lv_label_set_text(lbl, label);
+    lv_obj_set_style_text_color(lbl, fg, LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 30);
 }
@@ -279,190 +294,631 @@ static lv_color_t color_for_type(char t) {
     }
 }
 
-// ===== ECRAN 1 : COMMANDES =====
+// ===== ECRAN 1 : TABLEAU DE BORD =====
 void build_screen_buttons() {
     lv_obj_set_style_bg_color(screen_buttons, COL_DARK, LV_PART_MAIN);
-    make_hud_bar(screen_buttons, &hud_label_btn);
 
-    // TELEMETRY button (repositioned to leave room for the new CARTE button)
-    lv_obj_t * btn_telem = lv_btn_create(screen_buttons);
-    lv_obj_set_pos(btn_telem, 488, 6);
-    lv_obj_set_size(btn_telem, 147, 38);
-    lv_obj_set_style_bg_color(btn_telem, lv_color_hex(0x00552A), LV_PART_MAIN);
-    lv_obj_set_style_radius(btn_telem, 6, LV_PART_MAIN);
+    // ── EN-TETE (57 px) ──────────────────────────────────────────────────────
+    lv_obj_t * hdr = lv_obj_create(screen_buttons);
+    lv_obj_set_size(hdr, 800, 57);
+    lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_width(hdr, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(hdr, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Ligne separatrice inferieure de l'en-tete
+    lv_obj_t * hdr_sep = lv_obj_create(screen_buttons);
+    lv_obj_set_size(hdr_sep, 800, 2);
+    lv_obj_set_pos(hdr_sep, 0, 57);
+    lv_obj_set_style_bg_color(hdr_sep, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(hdr_sep, LV_OPA_50, LV_PART_MAIN);
+    lv_obj_set_style_border_width(hdr_sep, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(hdr_sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    // "SYSTEM" etiquette
+    lv_obj_t * sys_ttl = lv_label_create(hdr);
+    lv_label_set_text(sys_ttl, "SYSTEM");
+    lv_obj_set_style_text_color(sys_ttl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(sys_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(sys_ttl, 8, 4);
+
+    // "ONLINE" valeur
+    lv_obj_t * sys_val = lv_label_create(hdr);
+    lv_label_set_text(sys_val, "ONLINE");
+    lv_obj_set_style_text_color(sys_val, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(sys_val, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(sys_val, 8, 25);
+
+    // "BRIDGE" etiquette
+    lv_obj_t * brg_ttl = lv_label_create(hdr);
+    lv_label_set_text(brg_ttl, "BRIDGE");
+    lv_obj_set_style_text_color(brg_ttl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(brg_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(brg_ttl, 115, 4);
+
+    // Statut bridge (mis a jour dynamiquement)
+    hud_bridge_lbl = lv_label_create(hdr);
+    lv_label_set_text(hud_bridge_lbl, "OFFLINE");
+    lv_obj_set_style_text_color(hud_bridge_lbl, lv_color_hex(0xFF3300), LV_PART_MAIN);
+    lv_obj_set_style_text_font(hud_bridge_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(hud_bridge_lbl, 115, 25);
+
+    // Info HUD tank (mis a jour dynamiquement)
+    hud_label_btn = lv_label_create(hdr);
+    lv_label_set_text(hud_label_btn, "AWAITING TELEMETRY...");
+    lv_obj_set_style_text_color(hud_label_btn, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hud_label_btn, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_width(hud_label_btn, 215);
+    lv_label_set_long_mode(hud_label_btn, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(hud_label_btn, 228, 14);
+
+    // Bouton TACTICAL MAP
+    lv_obj_t * btn_map = lv_btn_create(hdr);
+    lv_obj_set_pos(btn_map, 452, 9);
+    lv_obj_set_size(btn_map, 143, 38);
+    lv_obj_set_style_bg_color(btn_map, lv_color_hex(0x001835), LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_map, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_map, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_map, 4, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn_map, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_map, cb_goto_map, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * map_lbl = lv_label_create(btn_map);
+    lv_label_set_text(map_lbl, LV_SYMBOL_GPS " TACTICAL MAP");
+    lv_obj_set_style_text_color(map_lbl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(map_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(map_lbl);
+
+    // Bouton SYS STATUS
+    lv_obj_t * btn_telem = lv_btn_create(hdr);
+    lv_obj_set_pos(btn_telem, 603, 9);
+    lv_obj_set_size(btn_telem, 130, 38);
+    lv_obj_set_style_bg_color(btn_telem, lv_color_hex(0x001835), LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_telem, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_telem, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_telem, 4, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn_telem, 0, LV_PART_MAIN);
     lv_obj_add_event_cb(btn_telem, cb_goto_telem, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * telem_lbl = lv_label_create(btn_telem);
-    lv_label_set_text(telem_lbl, LV_SYMBOL_RIGHT " TELEMETRY");
-    lv_obj_set_style_text_font(telem_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_center(telem_lbl);
+    lv_obj_t * telem_nav_lbl = lv_label_create(btn_telem);
+    lv_label_set_text(telem_nav_lbl, LV_SYMBOL_RIGHT " SYS STATUS");
+    lv_obj_set_style_text_color(telem_nav_lbl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(telem_nav_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(telem_nav_lbl);
 
-    // CARTE button (new — leads to Screen 3)
-    lv_obj_t * btn_carte = lv_btn_create(screen_buttons);
-    lv_obj_set_pos(btn_carte, 643, 6);
-    lv_obj_set_size(btn_carte, 150, 38);
-    lv_obj_set_style_bg_color(btn_carte, lv_color_hex(0x004466), LV_PART_MAIN);
-    lv_obj_set_style_radius(btn_carte, 6, LV_PART_MAIN);
-    lv_obj_add_event_cb(btn_carte, cb_goto_map, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * carte_lbl = lv_label_create(btn_carte);
-    lv_label_set_text(carte_lbl, LV_SYMBOL_GPS " CARTE");
-    lv_obj_set_style_text_font(carte_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_center(carte_lbl);
+    // Horloge (temps ecoule depuis le demarrage)
+    hud_time_lbl = lv_label_create(hdr);
+    lv_label_set_text(hud_time_lbl, "00:00:00");
+    lv_obj_set_style_text_color(hud_time_lbl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(hud_time_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(hud_time_lbl, LV_ALIGN_RIGHT_MID, -6, 0);
 
-    int32_t W = 228, H = 178;
-    int32_t Y1 = 60, Y2 = 255;
-    int32_t X1 = 12, X2 = 252, X3 = 492;
+    // ── 10 BOUTONS MFD — grille 5 × 2 ───────────────────────────────────────
+    // Dimensions : BW=150 BH=175, GAP=8, MARG=10
+    // Col X : 10, 168, 326, 484, 642   (fin col 5 = 792)
+    // Row Y : 67 (row1), 250 (row2)     (fin row2 = 425)
+    const int32_t BW = 150, BH = 175, GAP = 8, MARG = 10;
+    const int32_t Y1 = 67,  Y2 = Y1 + BH + GAP;
+    const int32_t X1 = MARG;
+    const int32_t X2 = X1 + BW + GAP;
+    const int32_t X3 = X2 + BW + GAP;
+    const int32_t X4 = X3 + BW + GAP;
+    const int32_t X5 = X4 + BW + GAP;
 
-    make_btn(screen_buttons, LV_SYMBOL_WARNING,  "EXTINCTEUR [6]", X1, Y1, W, H, cb_extincteur, &COL_DANGER);
-    make_btn(screen_buttons, LV_SYMBOL_WIFI,     "FUMIGENE [G]",   X2, Y1, W, H, cb_fumigene,   &COL_ARMOR);
-    make_btn(screen_buttons, LV_SYMBOL_GPS,      "ARTILLERIE [5]", X3, Y1, W, H, cb_artillerie, &COL_ARMOR);
-    make_btn(screen_buttons, LV_SYMBOL_IMAGE,    "JUMELLES [B]",   X1, Y2, W, H, cb_jumelles,   &COL_TECH);
-    make_btn(screen_buttons, LV_SYMBOL_VIDEO,    "VUE TIREUR",     X2, Y2, W, H, cb_sniper,     &COL_TECH);
-    make_btn(screen_buttons, LV_SYMBOL_SETTINGS, "MOTEUR [I]",     X3, Y2, W, H, cb_moteur,     &COL_ARMOR);
+    // Ligne 1 — commandes courantes
+    make_btn(screen_buttons, LV_SYMBOL_POWER,    "ENGINE [I]",     X1, Y1, BW, BH, cb_moteur,     false);
+    make_btn(screen_buttons, LV_SYMBOL_WIFI,     "SMOKE [G]",      X2, Y1, BW, BH, cb_fumigene,   true);
+    make_btn(screen_buttons, LV_SYMBOL_GPS,      "ARTILLERY [5]",  X3, Y1, BW, BH, cb_artillerie, true);
+    make_btn(screen_buttons, LV_SYMBOL_WARNING,  "EXTINGUISHER[6]",X4, Y1, BW, BH, cb_extincteur, false);
+    make_btn(screen_buttons, LV_SYMBOL_IMAGE,    "THERMAL [N]",    X5, Y1, BW, BH, cb_thermal,    false);
 
-    lv_obj_t * btn_rep = lv_btn_create(screen_buttons);
-    lv_obj_set_pos(btn_rep, 732, 60);
-    lv_obj_set_size(btn_rep, 58, 373);
-    lv_obj_set_style_bg_color(btn_rep, lv_color_hex(0x2a5500), LV_PART_MAIN);
-    lv_obj_set_style_radius(btn_rep, 10, LV_PART_MAIN);
-    lv_obj_add_event_cb(btn_rep, cb_reparation, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(btn_rep, btn_visual_cb, LV_EVENT_PRESSED,    &COL_ARMOR);
-    lv_obj_add_event_cb(btn_rep, btn_visual_cb, LV_EVENT_RELEASED,   &COL_ARMOR);
-    lv_obj_add_event_cb(btn_rep, btn_visual_cb, LV_EVENT_PRESS_LOST, &COL_ARMOR);
-    lv_obj_t * rep_lbl = lv_label_create(btn_rep);
-    lv_label_set_text(rep_lbl, "REP\nARA\nTION\n[F]");
-    lv_obj_set_style_text_font(rep_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_center(rep_lbl);
+    // Ligne 2 — optiques et capacites
+    make_btn(screen_buttons, LV_SYMBOL_VIDEO,    "BINOCULARS [B]", X1, Y2, BW, BH, cb_jumelles,    false);
+    make_btn(screen_buttons, LV_SYMBOL_SETTINGS, "RANGEFINDER[R]", X2, Y2, BW, BH, cb_rangefinder, false);
+    make_btn(screen_buttons, LV_SYMBOL_STOP,     "TRACK TGT [X]",  X3, Y2, BW, BH, cb_track,       false);
+    make_btn(screen_buttons, LV_SYMBOL_EDIT,     "TOW CABLE [0]",  X4, Y2, BW, BH, cb_towcable,    false);
+    make_btn(screen_buttons, LV_SYMBOL_GPS,      "ARTY STRIKE[M]", X5, Y2, BW, BH, cb_arty_coord,  false);
+
+    // ── BARRE DU BAS ─────────────────────────────────────────────────────────
+    lv_obj_t * bot = lv_obj_create(screen_buttons);
+    lv_obj_set_size(bot, 800, 38);
+    lv_obj_align(bot, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(bot, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(bot, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(bot, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bot, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(bot, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(bot, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * bot_lbl_l = lv_label_create(bot);
+    lv_label_set_text(bot_lbl_l, "BRIDGE: START wt_telemetry.py");
+    lv_obj_set_style_text_color(bot_lbl_l, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(bot_lbl_l, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(bot_lbl_l, LV_ALIGN_LEFT_MID, 8, 0);
+
+    lv_obj_t * bot_l1 = lv_label_create(bot);
+    lv_label_set_text(bot_l1, "[L1]");
+    lv_obj_set_style_text_color(bot_l1, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(bot_l1, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(bot_l1, LV_ALIGN_CENTER, -55, 0);
+
+    lv_obj_t * bot_l2 = lv_label_create(bot);
+    lv_label_set_text(bot_l2, "[L2]");
+    lv_obj_set_style_text_color(bot_l2, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(bot_l2, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(bot_l2, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t * bot_l3 = lv_label_create(bot);
+    lv_label_set_text(bot_l3, "[L3]");
+    lv_obj_set_style_text_color(bot_l3, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(bot_l3, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(bot_l3, LV_ALIGN_CENTER, 55, 0);
+
+    lv_obj_t * bot_lbl_r = lv_label_create(bot);
+    lv_label_set_text(bot_lbl_r, "ARMAMENT: HOT");
+    lv_obj_set_style_text_color(bot_lbl_r, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(bot_lbl_r, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(bot_lbl_r, LV_ALIGN_RIGHT_MID, -8, 0);
 }
 
-// ===== HELPER BLOC TELEMETRIE =====
-// LVGL 9: lv_coord_t removed, use int32_t
-void make_data_block(lv_obj_t * parent, const char* title_str, lv_obj_t ** val_label,
-                     int32_t x, int32_t y) {
+// ===== HELPER MINI-BOITE DRIVETRAIN =====
+// Cree une boite avec titre, valeur (dynamique) et unite dans un conteneur parent.
+static void make_drive_box(lv_obj_t * parent,
+                           const char * title_str,
+                           lv_obj_t ** val_out,
+                           const char * unit_str,
+                           int32_t bx, int32_t by) {
+    const int32_t BW = 178, BH = 65;
     lv_obj_t * box = lv_obj_create(parent);
-    lv_obj_set_size(box, 220, 110);
-    lv_obj_set_pos(box, x, y);
-    lv_obj_set_style_bg_color(box, lv_color_hex(0x1C2C1C), LV_PART_MAIN);
-    lv_obj_set_style_border_color(box, lv_color_hex(0x00FF00), LV_PART_MAIN);
-    lv_obj_set_style_border_width(box, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(box, 8, LV_PART_MAIN);
-    // LVGL 9: lv_obj_clear_flag -> lv_obj_remove_flag
+    lv_obj_set_pos(box, bx, by);
+    lv_obj_set_size(box, BW, BH);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x051005), LV_PART_MAIN);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_border_width(box, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(box, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(box, 6, LV_PART_MAIN);
     lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t * ttl = lv_label_create(box);
     lv_label_set_text(ttl, title_str);
-    lv_obj_set_style_text_color(ttl, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_set_style_text_color(ttl, lv_color_hex(0x336633), LV_PART_MAIN);
     lv_obj_set_style_text_font(ttl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(ttl, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_set_pos(ttl, 0, 0);
 
-    *val_label = lv_label_create(box);
-    lv_label_set_text(*val_label, "---");
-    lv_obj_set_style_text_color(*val_label, lv_color_hex(0x00FF00), LV_PART_MAIN);
-    lv_obj_set_style_text_font(*val_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(*val_label, LV_ALIGN_CENTER, 0, 12);
+    *val_out = lv_label_create(box);
+    lv_label_set_text(*val_out, "--");
+    lv_obj_set_style_text_color(*val_out, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(*val_out, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(*val_out, LV_ALIGN_CENTER, 0, 4);
+
+    lv_obj_t * unit = lv_label_create(box);
+    lv_label_set_text(unit, unit_str);
+    lv_obj_set_style_text_color(unit, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(unit, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(unit, LV_ALIGN_BOTTOM_MID, 0, 0);
 }
 
-// ===== ECRAN 2 : TELEMETRIE =====
+// ===== HELPER BARRE DE PROGRESSION ETIQUETEE =====
+// Cree une barre de progression avec nom et barre dans un conteneur parent.
+static void make_module_bar(lv_obj_t * parent,
+                            const char * name_str,
+                            int32_t pct,
+                            int32_t by) {
+    lv_obj_t * name = lv_label_create(parent);
+    lv_label_set_text(name, name_str);
+    lv_obj_set_style_text_color(name, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(name, 0, by);
+
+    lv_obj_t * bar = lv_bar_create(parent);
+    lv_obj_set_pos(bar, 125, by + 1);
+    lv_obj_set_size(bar, 200, 12);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, pct, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x0A3302), LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar, 1, LV_PART_MAIN);
+    lv_color_t bar_col = (pct > 50) ? COL_NEON : lv_color_hex(0xFF4444);
+    lv_obj_set_style_bg_color(bar, bar_col, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 2, LV_PART_INDICATOR);
+
+    char pbuf[8];
+    snprintf(pbuf, sizeof(pbuf), "%d%%", pct);
+    lv_obj_t * pct_lbl = lv_label_create(parent);
+    lv_label_set_text(pct_lbl, pbuf);
+    lv_obj_set_style_text_color(pct_lbl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(pct_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(pct_lbl, 332, by);
+}
+
+// ===== ECRAN 2 : VEHICULE STATUS =====
 void build_screen_telem() {
     lv_obj_set_style_bg_color(screen_telem, COL_DARK, LV_PART_MAIN);
 
-    lv_obj_t * title = lv_label_create(screen_telem);
-    lv_label_set_text(title, "[ VEHICLE TELEMETRY - WAR THUNDER LINK ]");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x00FF00), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
+    // ── EN-TETE ──────────────────────────────────────────────────────────────
+    lv_obj_t * hdr = lv_obj_create(screen_telem);
+    lv_obj_set_size(hdr, 800, 55);
+    lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_width(hdr, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(hdr, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t * sep = lv_obj_create(screen_telem);
-    lv_obj_set_size(sep, 780, 2);
-    lv_obj_set_style_bg_color(sep, lv_color_hex(0x00FF00), LV_PART_MAIN);
+    lv_obj_set_size(sep, 800, 2);
+    lv_obj_set_pos(sep, 0, 55);
+    lv_obj_set_style_bg_color(sep, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(sep, LV_OPA_50, LV_PART_MAIN);
     lv_obj_set_style_border_width(sep, 0, LV_PART_MAIN);
-    lv_obj_align(sep, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_remove_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
 
-    telem_status = lv_label_create(screen_telem);
-    lv_label_set_text(telem_status, "[ ] PC BRIDGE: OFFLINE");
+    // Bouton retour
+    lv_obj_t * btn_back_hdr = lv_btn_create(hdr);
+    lv_obj_set_pos(btn_back_hdr, 8, 8);
+    lv_obj_set_size(btn_back_hdr, 50, 38);
+    lv_obj_set_style_bg_color(btn_back_hdr, lv_color_hex(0x001835), LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_back_hdr, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_back_hdr, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_back_hdr, 4, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn_back_hdr, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_back_hdr, cb_goto_buttons, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * back_ico = lv_label_create(btn_back_hdr);
+    lv_label_set_text(back_ico, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_ico, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(back_ico, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(back_ico);
+
+    // DIAGNOSTICS / statut bridge
+    lv_obj_t * diag_ttl = lv_label_create(hdr);
+    lv_label_set_text(diag_ttl, "DIAGNOSTICS");
+    lv_obj_set_style_text_color(diag_ttl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(diag_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(diag_ttl, 68, 4);
+
+    telem_status = lv_label_create(hdr);
+    lv_label_set_text(telem_status, "BRIDGE OFFLINE");
     lv_obj_set_style_text_color(telem_status, lv_color_hex(0xFF3300), LV_PART_MAIN);
     lv_obj_set_style_text_font(telem_status, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(telem_status, LV_ALIGN_TOP_LEFT, 30, 55);
+    lv_obj_set_pos(telem_status, 68, 25);
 
-    make_data_block(screen_telem, "VITESSE (km/h)", &telem_spd,  30,  110);
-    make_data_block(screen_telem, "REGIME (RPM)",   &telem_rpm,  290, 110);
-    make_data_block(screen_telem, "RAPPORT",        &telem_gear, 550, 110);
+    // Titre droit
+    lv_obj_t * telem_title = lv_label_create(hdr);
+    lv_label_set_text(telem_title, "VEHICLE TELEMETRY");
+    lv_obj_set_style_text_color(telem_title, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(telem_title, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(telem_title, LV_ALIGN_RIGHT_MID, -10, 0);
 
-    lv_obj_t * raw_title = lv_label_create(screen_telem);
-    lv_label_set_text(raw_title, "RAW DATA STREAM:");
-    lv_obj_set_style_text_color(raw_title, lv_color_hex(0x666666), LV_PART_MAIN);
-    lv_obj_set_style_text_font(raw_title, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(raw_title, LV_ALIGN_TOP_LEFT, 30, 240);
+    // ── COLONNE GAUCHE (x=10, w=375) ─────────────────────────────────────────
 
-    telem_raw = lv_label_create(screen_telem);
-    lv_label_set_text(telem_raw, "En attente de donnees...");
-    lv_label_set_long_mode(telem_raw, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(telem_raw, 740);
-    lv_obj_set_style_text_color(telem_raw, lv_color_hex(0x00CC00), LV_PART_MAIN);
-    lv_obj_set_style_text_font(telem_raw, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(telem_raw, LV_ALIGN_TOP_LEFT, 30, 262);
+    // Panel CREW STATUS
+    lv_obj_t * crew_panel = lv_obj_create(screen_telem);
+    lv_obj_set_pos(crew_panel, 10, 65);
+    lv_obj_set_size(crew_panel, 375, 173);
+    lv_obj_set_style_bg_color(crew_panel, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(crew_panel, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(crew_panel, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(crew_panel, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(crew_panel, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(crew_panel, 10, LV_PART_MAIN);
+    lv_obj_remove_flag(crew_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t * btn_back = lv_btn_create(screen_telem);
-    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_MID, 0, -15);
-    lv_obj_set_size(btn_back, 300, 50);
-    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x552200), LV_PART_MAIN);
-    lv_obj_set_style_radius(btn_back, 8, LV_PART_MAIN);
-    lv_obj_add_event_cb(btn_back, cb_goto_buttons, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * back_lbl = lv_label_create(btn_back);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT " PANNEAU DE COMMANDES");
-    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_center(back_lbl);
+    lv_obj_t * crew_ttl = lv_label_create(crew_panel);
+    lv_label_set_text(crew_ttl, "CREW STATUS");
+    lv_obj_set_style_text_color(crew_ttl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(crew_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(crew_ttl, 0, 0);
+
+    // Separateur interne
+    lv_obj_t * crew_sep = lv_obj_create(crew_panel);
+    lv_obj_set_size(crew_sep, 355, 1);
+    lv_obj_set_pos(crew_sep, 0, 20);
+    lv_obj_set_style_bg_color(crew_sep, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(crew_sep, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(crew_sep, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(crew_sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * pers_lbl = lv_label_create(crew_panel);
+    lv_label_set_text(pers_lbl, "PERSONNEL");
+    lv_obj_set_style_text_color(pers_lbl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(pers_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(pers_lbl, 0, 28);
+
+    telem_crew_count = lv_label_create(crew_panel);
+    lv_label_set_text(telem_crew_count, "--/--");
+    lv_obj_set_style_text_color(telem_crew_count, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(telem_crew_count, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(telem_crew_count, LV_ALIGN_TOP_RIGHT, 0, 28);
+
+    telem_crew_bar = lv_bar_create(crew_panel);
+    lv_obj_set_size(telem_crew_bar, 355, 14);
+    lv_obj_set_pos(telem_crew_bar, 0, 52);
+    lv_bar_set_range(telem_crew_bar, 0, 100);
+    lv_bar_set_value(telem_crew_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(telem_crew_bar, lv_color_hex(0x0A3302), LV_PART_MAIN);
+    lv_obj_set_style_border_color(telem_crew_bar, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_border_width(telem_crew_bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(telem_crew_bar, COL_NEON, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(telem_crew_bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(telem_crew_bar, 2, LV_PART_INDICATOR);
+
+    lv_obj_t * crew_pct_lbl = lv_label_create(crew_panel);
+    lv_label_set_text(crew_pct_lbl, "0% OPERATIONAL");
+    lv_obj_set_style_text_color(crew_pct_lbl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(crew_pct_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(crew_pct_lbl, LV_ALIGN_TOP_RIGHT, 0, 72);
+
+    lv_obj_t * stab_ttl = lv_label_create(crew_panel);
+    lv_label_set_text(stab_ttl, "STABILIZER");
+    lv_obj_set_style_text_color(stab_ttl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(stab_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(stab_ttl, 0, 100);
+
+    lv_obj_t * stab_val = lv_label_create(crew_panel);
+    lv_label_set_text(stab_val, "--");
+    lv_obj_set_style_text_color(stab_val, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(stab_val, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(stab_val, LV_ALIGN_TOP_RIGHT, 0, 100);
+
+    // Panel AMMUNITION
+    lv_obj_t * ammo_panel = lv_obj_create(screen_telem);
+    lv_obj_set_pos(ammo_panel, 10, 248);
+    lv_obj_set_size(ammo_panel, 375, 168);
+    lv_obj_set_style_bg_color(ammo_panel, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(ammo_panel, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(ammo_panel, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ammo_panel, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(ammo_panel, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ammo_panel, 10, LV_PART_MAIN);
+    lv_obj_remove_flag(ammo_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * ammo_ttl = lv_label_create(ammo_panel);
+    lv_label_set_text(ammo_ttl, "AMMUNITION");
+    lv_obj_set_style_text_color(ammo_ttl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ammo_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(ammo_ttl, 0, 0);
+
+    lv_obj_t * ammo_sep = lv_obj_create(ammo_panel);
+    lv_obj_set_size(ammo_sep, 355, 1);
+    lv_obj_set_pos(ammo_sep, 0, 20);
+    lv_obj_set_style_bg_color(ammo_sep, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(ammo_sep, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ammo_sep, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(ammo_sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * ammo_sub = lv_label_create(ammo_panel);
+    lv_label_set_text(ammo_sub, "MAIN ROUND (1ST STAGE)");
+    lv_obj_set_style_text_color(ammo_sub, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(ammo_sub, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(ammo_sub, 0, 28);
+
+    telem_ammo_lbl = lv_label_create(ammo_panel);
+    lv_label_set_text(telem_ammo_lbl, "--");
+    lv_obj_set_style_text_color(telem_ammo_lbl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(telem_ammo_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(telem_ammo_lbl, LV_ALIGN_TOP_RIGHT, 0, 28);
+
+    telem_ammo_bar = lv_bar_create(ammo_panel);
+    lv_obj_set_size(telem_ammo_bar, 355, 10);
+    lv_obj_set_pos(telem_ammo_bar, 0, 52);
+    lv_bar_set_range(telem_ammo_bar, 0, 40);
+    lv_bar_set_value(telem_ammo_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(telem_ammo_bar, lv_color_hex(0x0A3302), LV_PART_MAIN);
+    lv_obj_set_style_border_color(telem_ammo_bar, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_border_width(telem_ammo_bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(telem_ammo_bar, COL_NEON, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(telem_ammo_bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(telem_ammo_bar, 2, LV_PART_INDICATOR);
+
+    lv_obj_t * ammo_note = lv_label_create(ammo_panel);
+    lv_label_set_text(ammo_note, "Secondary counters not exposed by WT API.");
+    lv_obj_set_style_text_color(ammo_note, lv_color_hex(0x226622), LV_PART_MAIN);
+    lv_obj_set_style_text_font(ammo_note, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(ammo_note, 0, 70);
+
+    // ── COLONNE DROITE (x=395, w=395) ────────────────────────────────────────
+
+    // Panel DRIVETRAIN (grille 2x2 : vitesse, rpm, rapport, carburant)
+    lv_obj_t * drive_panel = lv_obj_create(screen_telem);
+    lv_obj_set_pos(drive_panel, 395, 65);
+    lv_obj_set_size(drive_panel, 395, 195);
+    lv_obj_set_style_bg_color(drive_panel, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(drive_panel, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(drive_panel, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(drive_panel, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(drive_panel, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(drive_panel, 10, LV_PART_MAIN);
+    lv_obj_remove_flag(drive_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * drive_ttl = lv_label_create(drive_panel);
+    lv_label_set_text(drive_ttl, "DRIVETRAIN");
+    lv_obj_set_style_text_color(drive_ttl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(drive_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(drive_ttl, 0, 0);
+
+    lv_obj_t * drive_sep = lv_obj_create(drive_panel);
+    lv_obj_set_size(drive_sep, 375, 1);
+    lv_obj_set_pos(drive_sep, 0, 20);
+    lv_obj_set_style_bg_color(drive_sep, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(drive_sep, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(drive_sep, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(drive_sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Grille 2x2 des instruments
+    make_drive_box(drive_panel, "SPEED", &telem_spd,      "KM/H",    0,   26);
+    make_drive_box(drive_panel, "RPM",   &telem_rpm,      "ENGINE",  187, 26);
+    make_drive_box(drive_panel, "GEAR",  &telem_gear,     "CURRENT", 0,   97);
+    make_drive_box(drive_panel, "FUEL",  &telem_fuel_lbl, "%",       187, 97);
+
+    // Panel MODULE INTEGRITY (valeurs placeholder — API WT ne les expose pas)
+    lv_obj_t * mod_panel = lv_obj_create(screen_telem);
+    lv_obj_set_pos(mod_panel, 395, 270);
+    lv_obj_set_size(mod_panel, 395, 168);
+    lv_obj_set_style_bg_color(mod_panel, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(mod_panel, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(mod_panel, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(mod_panel, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(mod_panel, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(mod_panel, 10, LV_PART_MAIN);
+    lv_obj_remove_flag(mod_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * mod_ttl = lv_label_create(mod_panel);
+    lv_label_set_text(mod_ttl, "MODULE INTEGRITY");
+    lv_obj_set_style_text_color(mod_ttl, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(mod_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(mod_ttl, 0, 0);
+
+    lv_obj_t * mod_sep = lv_obj_create(mod_panel);
+    lv_obj_set_size(mod_sep, 375, 1);
+    lv_obj_set_pos(mod_sep, 0, 20);
+    lv_obj_set_style_bg_color(mod_sep, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(mod_sep, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(mod_sep, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(mod_sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Barres de modules (placeholder — WT API n'expose pas les degats de modules)
+    static const char * mod_names[] = { "ENGINE", "TRANSMISSION", "TURRET DRV", "GUN BARREL", "TRACK L", "TRACK R" };
+    static const int    mod_pct[]   = { 100, 100, 100, 100, 85, 90 };
+    for (int i = 0; i < 6; i++) {
+        make_module_bar(mod_panel, mod_names[i], mod_pct[i], 26 + i * 22);
+    }
+
+    // ── BARRE DU BAS ─────────────────────────────────────────────────────────
+    lv_obj_t * bot = lv_obj_create(screen_telem);
+    lv_obj_set_size(bot, 800, 38);
+    lv_obj_align(bot, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(bot, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(bot, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(bot, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bot, 1, LV_PART_MAIN);
+    lv_obj_set_style_radius(bot, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(bot, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * bot_l = lv_label_create(bot);
+    lv_label_set_text(bot_l, "TELEMETRY: BRIDGE OFFLINE");
+    lv_obj_set_style_text_color(bot_l, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(bot_l, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(bot_l, LV_ALIGN_LEFT_MID, 8, 0);
+
+    lv_obj_t * bot_r = lv_label_create(bot);
+    lv_label_set_text(bot_r, "STAB: --");
+    lv_obj_set_style_text_color(bot_r, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(bot_r, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(bot_r, LV_ALIGN_RIGHT_MID, -8, 0);
 }
 
 // ===== ECRAN 3 : CARTE TACTIQUE =====
 void build_screen_map() {
     lv_obj_set_style_bg_color(screen_map, COL_DARK, LV_PART_MAIN);
 
-    lv_obj_t * title = lv_label_create(screen_map);
-    lv_label_set_text(title, "[ CARTE TACTIQUE - WAR THUNDER ]");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x00FF00), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 30, 10);
+    // ── EN-TETE ──────────────────────────────────────────────────────────────
+    lv_obj_t * hdr = lv_obj_create(screen_map);
+    lv_obj_set_size(hdr, 800, 55);
+    lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, lv_color_hex(0x0A1A0A), LV_PART_MAIN);
+    lv_obj_set_style_border_width(hdr, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(hdr, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
 
-    map_name_label = lv_label_create(screen_map);
+    lv_obj_t * hdr_sep = lv_obj_create(screen_map);
+    lv_obj_set_size(hdr_sep, 800, 2);
+    lv_obj_set_pos(hdr_sep, 0, 55);
+    lv_obj_set_style_bg_color(hdr_sep, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(hdr_sep, LV_OPA_50, LV_PART_MAIN);
+    lv_obj_set_style_border_width(hdr_sep, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(hdr_sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Bouton retour
+    lv_obj_t * btn_back_hdr = lv_btn_create(hdr);
+    lv_obj_set_pos(btn_back_hdr, 8, 8);
+    lv_obj_set_size(btn_back_hdr, 50, 38);
+    lv_obj_set_style_bg_color(btn_back_hdr, lv_color_hex(0x001835), LV_PART_MAIN);
+    lv_obj_set_style_border_color(btn_back_hdr, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_back_hdr, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(btn_back_hdr, 4, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn_back_hdr, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn_back_hdr, cb_goto_buttons, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * back_ico = lv_label_create(btn_back_hdr);
+    lv_label_set_text(back_ico, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_ico, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_text_font(back_ico, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(back_ico);
+
+    // SAT-LINK / statut
+    lv_obj_t * sat_ttl = lv_label_create(hdr);
+    lv_label_set_text(sat_ttl, "SAT-LINK");
+    lv_obj_set_style_text_color(sat_ttl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(sat_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(sat_ttl, 68, 4);
+
+    lv_obj_t * sat_val = lv_label_create(hdr);
+    lv_label_set_text(sat_val, "BRIDGE OFFLINE");
+    lv_obj_set_style_text_color(sat_val, lv_color_hex(0xFF3300), LV_PART_MAIN);
+    lv_obj_set_style_text_font(sat_val, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_pos(sat_val, 68, 25);
+
+    // Titre droit : TACTICAL GRID // nom de carte
+    lv_obj_t * grid_ttl = lv_label_create(hdr);
+    lv_label_set_text(grid_ttl, "TACTICAL GRID // ");
+    lv_obj_set_style_text_color(grid_ttl, lv_color_hex(0x336633), LV_PART_MAIN);
+    lv_obj_set_style_text_font(grid_ttl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(grid_ttl, LV_ALIGN_RIGHT_MID, -90, 0);
+
+    map_name_label = lv_label_create(hdr);
     lv_label_set_text(map_name_label, "---");
-    lv_obj_set_style_text_color(map_name_label, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_set_style_text_color(map_name_label, COL_NEON, LV_PART_MAIN);
     lv_obj_set_style_text_font(map_name_label, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(map_name_label, LV_ALIGN_TOP_RIGHT, -30, 10);
+    lv_obj_align(map_name_label, LV_ALIGN_RIGHT_MID, -8, 0);
 
-    lv_obj_t * sep = lv_obj_create(screen_map);
-    lv_obj_set_size(sep, 780, 2);
-    lv_obj_set_style_bg_color(sep, lv_color_hex(0x00FF00), LV_PART_MAIN);
-    lv_obj_set_style_border_width(sep, 0, LV_PART_MAIN);
-    lv_obj_align(sep, LV_ALIGN_TOP_MID, 0, 35);
-
+    // ── CONTENEUR CARTE ──────────────────────────────────────────────────────
     // Map display container — dots are positioned inside relative to (0,0) top-left.
     map_container = lv_obj_create(screen_map);
     lv_obj_set_size(map_container, MAP_CONT_W, MAP_CONT_H);
-    lv_obj_set_pos(map_container, 30, 44);
+    lv_obj_set_pos(map_container, 30, 64);
     lv_obj_set_style_bg_color(map_container, lv_color_hex(0x060F06), LV_PART_MAIN);
-    lv_obj_set_style_border_color(map_container, lv_color_hex(0x00AA00), LV_PART_MAIN);
+    lv_obj_set_style_border_color(map_container, COL_NEON, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(map_container, LV_OPA_30, LV_PART_MAIN);
     lv_obj_set_style_border_width(map_container, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(map_container, 5, LV_PART_MAIN);
+    lv_obj_set_style_radius(map_container, 4, LV_PART_MAIN);
     lv_obj_set_style_pad_all(map_container, 0, LV_PART_MAIN);
     lv_obj_remove_flag(map_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    // ── Image d'arriere-plan (cree en PREMIER = z-order le plus bas = derriere les points) ──
-    // Initialise le descripteur LVGL une fois pour toutes ; g_map_raw est le tampon de pixels.
+    // ── Image d'arriere-plan (z-order le plus bas) ────────────────────────────
     map_img_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
     map_img_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
     map_img_dsc.header.flags  = 0;
     map_img_dsc.header.w      = MAP_RAW_W;
     map_img_dsc.header.h      = MAP_RAW_H;
-    map_img_dsc.header.stride = (uint16_t)(MAP_RAW_W * 2);  // octets par ligne
+    map_img_dsc.header.stride = (uint16_t)(MAP_RAW_W * 2);
     map_img_dsc.data_size     = MAP_RAW_BYTES;
     map_img_dsc.data          = g_map_raw;
 
     map_bg_img = lv_image_create(map_container);
     lv_image_set_src(map_bg_img, &map_img_dsc);
     lv_obj_set_pos(map_bg_img, 0, 0);
-    lv_image_set_pivot(map_bg_img, 0, 0);        // ancre en haut a gauche pour le scaling
-    lv_image_set_scale(map_bg_img, MAP_BG_SCALE); // 5× : 148→740, 65→325
-    lv_obj_add_flag(map_bg_img, LV_OBJ_FLAG_HIDDEN);  // cache jusqu'a reception de la 1re image
+    lv_image_set_pivot(map_bg_img, 0, 0);
+    lv_image_set_scale(map_bg_img, MAP_BG_SCALE);
+    lv_obj_add_flag(map_bg_img, LV_OBJ_FLAG_HIDDEN);
+
+    // ── Anneaux radar (style Figma — dessus de l'image, dessous des points) ──
+    // Centre du conteneur : (MAP_CONT_W/2, MAP_CONT_H/2) = (370, 162)
+    // Rayons : 50, 100, 150 px (contrainte verticale : r <= 162)
+    const int32_t cx = MAP_CONT_W / 2;
+    const int32_t cy = MAP_CONT_H / 2;
+    const int32_t ring_radii[] = { 50, 100, 150 };
+    for (int ri = 0; ri < 3; ri++) {
+        int32_t r = ring_radii[ri];
+        lv_obj_t * ring = lv_obj_create(map_container);
+        lv_obj_set_size(ring, r * 2, r * 2);
+        lv_obj_set_pos(ring, cx - r, cy - r);
+        lv_obj_set_style_bg_opa(ring, LV_OPA_0, LV_PART_MAIN);
+        lv_obj_set_style_border_color(ring, COL_NEON, LV_PART_MAIN);
+        lv_obj_set_style_border_opa(ring, LV_OPA_20, LV_PART_MAIN);
+        lv_obj_set_style_border_width(ring, 1, LV_PART_MAIN);
+        lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(ring, 0, LV_PART_MAIN);
+        lv_obj_remove_flag(ring, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+    }
 
     // Waiting placeholder shown until the first map message arrives.
     map_wait_label = lv_label_create(map_container);
@@ -483,30 +939,41 @@ void build_screen_map() {
         lv_obj_set_pos(map_dots[i], 0, 0);
     }
 
-    // Legend
-    lv_obj_t * legend = lv_label_create(screen_map);
-    lv_label_set_text(legend, "  A Allie   E Ennemi   O Objectif   F Aerodrome");
-    lv_obj_set_style_text_color(legend, lv_color_hex(0x445544), LV_PART_MAIN);
-    lv_obj_set_style_text_font(legend, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_pos(legend, 30, 376);
+    // ── Legende (style Figma avec points colores) ─────────────────────────────
+    // Couleurs correspondant a color_for_type()
+    lv_color_t leg_cols[4];
+    const char * leg_txts[4] = { "ALLY", "ENEMY", "OBJECTIVE", "AIRFIELD" };
+    leg_cols[0] = lv_color_hex(0x00CC00);  // vert  - allie
+    leg_cols[1] = lv_color_hex(0xFF2200);  // rouge - ennemi
+    leg_cols[2] = lv_color_hex(0xFFCC00);  // jaune - objectif
+    leg_cols[3] = lv_color_hex(0x555555);  // gris  - aerodrome
+    int32_t lx = 32;
+    const int32_t LEG_Y = MAP_CONT_H + 64 + 8;  // juste sous le conteneur
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t * dot = lv_obj_create(screen_map);
+        lv_obj_set_pos(dot, lx, LEG_Y + 2);
+        lv_obj_set_size(dot, 10, 10);
+        lv_obj_set_style_bg_color(dot, leg_cols[i], LV_PART_MAIN);
+        lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_remove_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+        lx += 14;
 
-    lv_obj_t * btn_back = lv_btn_create(screen_map);
-    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_MID, 0, -15);
-    lv_obj_set_size(btn_back, 300, 50);
-    lv_obj_set_style_bg_color(btn_back, lv_color_hex(0x552200), LV_PART_MAIN);
-    lv_obj_set_style_radius(btn_back, 8, LV_PART_MAIN);
-    lv_obj_add_event_cb(btn_back, cb_goto_buttons, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * back_lbl = lv_label_create(btn_back);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT " PANNEAU DE COMMANDES");
-    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_center(back_lbl);
+        lv_obj_t * txt = lv_label_create(screen_map);
+        lv_label_set_text(txt, leg_txts[i]);
+        lv_obj_set_style_text_color(txt, leg_cols[i], LV_PART_MAIN);
+        lv_obj_set_style_text_font(txt, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_pos(txt, lx, LEG_Y);
+        // Estime la largeur du texte (~8 px/char a font_14) + marge
+        lx += (int32_t)(strlen(leg_txts[i]) * 8 + 16);
+    }
 }
 
 // ===== PARSING SERIAL - TELEMETRIE (serial thread, no LVGL) =====
 // Fills *out* from a raw telemetry line.  Must NOT call any lv_* function.
-// Expected format: SPD:{int}|RPM:{int}|GEAR:{val}|...|STATUS:{0/1}
+// Expected format: SPD:{int}|RPM:{int}|GEAR:{val}|AMMO:{int}|STAB:{0/1}|FUEL:{int}|...|STATUS:{0/1}
 static void parse_telem_string(const String& data, TelemShared& out) {
-    // Store raw line for the telemetry debug label
+    // Store raw line for debug
     data.toCharArray(out.raw, sizeof(out.raw) - 1);
     out.raw[sizeof(out.raw) - 1] = '\0';
 
@@ -525,6 +992,15 @@ static void parse_telem_string(const String& data, TelemShared& out) {
     } else {
         snprintf(out.gear, sizeof(out.gear), "---");
     }
+
+    idx = data.indexOf("AMMO:");
+    out.ammo = (idx >= 0) ? data.substring(idx + 5, data.indexOf("|", idx)).toInt() : -1;
+
+    idx = data.indexOf("STAB:");
+    out.stab = (idx >= 0) ? data.substring(idx + 5, data.indexOf("|", idx)).toInt() : 0;
+
+    idx = data.indexOf("FUEL:");
+    out.fuel = (idx >= 0) ? data.substring(idx + 5, data.indexOf("|", idx)).toInt() : -1;
 
     idx = data.indexOf("TANK:");
     if (idx >= 0) {
@@ -601,26 +1077,87 @@ static void parse_map_string(const String& data, MapShared& out) {
 // Reads a local copy of TelemShared (no mutex held) and updates LVGL widgets.
 static void apply_telem_update(const TelemShared& d) {
     char buf[96];
+
+    // ── HUD ligne principale (ecran boutons) ─────────────────────────────────
     snprintf(buf, sizeof(buf), "%.32s | %d km/h | CREW:%d/%d",
              d.tank, d.spd, d.crew, d.crew_total);
     lv_label_set_text(hud_label_btn, buf);
 
+    // Statut bridge (ecran boutons)
+    if (hud_bridge_lbl) {
+        if (d.online) {
+            lv_label_set_text(hud_bridge_lbl, "ACTIVE");
+            lv_obj_set_style_text_color(hud_bridge_lbl, COL_NEON, LV_PART_MAIN);
+        } else {
+            lv_label_set_text(hud_bridge_lbl, "OFFLINE");
+            lv_obj_set_style_text_color(hud_bridge_lbl, lv_color_hex(0xFF3300), LV_PART_MAIN);
+        }
+    }
+
+    // Statut bridge (ecran vehicule status)
     if (d.online) {
-        lv_label_set_text(telem_status, "[OK] PC BRIDGE: ONLINE");
-        lv_obj_set_style_text_color(telem_status, lv_color_hex(0x00FF00), LV_PART_MAIN);
+        lv_label_set_text(telem_status, "LIVE");
+        lv_obj_set_style_text_color(telem_status, COL_NEON, LV_PART_MAIN);
     } else {
-        lv_label_set_text(telem_status, "[!!] PC BRIDGE: OFFLINE");
+        lv_label_set_text(telem_status, "BRIDGE OFFLINE");
         lv_obj_set_style_text_color(telem_status, lv_color_hex(0xFF3300), LV_PART_MAIN);
     }
 
-    snprintf(buf, sizeof(buf), "%d km/h", d.spd);
+    // ── Instruments drivetrain ────────────────────────────────────────────────
+    snprintf(buf, sizeof(buf), "%d", d.spd);
     lv_label_set_text(telem_spd, buf);
 
     snprintf(buf, sizeof(buf), "%d", d.rpm);
     lv_label_set_text(telem_rpm, buf);
 
     lv_label_set_text(telem_gear, d.gear);
-    lv_label_set_text(telem_raw,  d.raw);
+
+    if (telem_fuel_lbl) {
+        if (d.fuel >= 0) {
+            snprintf(buf, sizeof(buf), "%d", d.fuel);
+            lv_label_set_text(telem_fuel_lbl, buf);
+            lv_obj_set_style_text_color(telem_fuel_lbl,
+                d.fuel < 20 ? lv_color_hex(0xFF4444) : COL_NEON, LV_PART_MAIN);
+        } else {
+            lv_label_set_text(telem_fuel_lbl, "N/A");
+        }
+    }
+
+    // ── Crew bar ──────────────────────────────────────────────────────────────
+    if (telem_crew_count) {
+        snprintf(buf, sizeof(buf), "%d/%d", d.crew, d.crew_total);
+        lv_label_set_text(telem_crew_count, buf);
+        lv_color_t cnt_col = (d.crew_total > 0 && d.crew < d.crew_total)
+                             ? lv_color_hex(0xFF4444) : COL_NEON;
+        lv_obj_set_style_text_color(telem_crew_count, cnt_col, LV_PART_MAIN);
+    }
+    if (telem_crew_bar) {
+        int pct = (d.crew_total > 0) ? (d.crew * 100 / d.crew_total) : 0;
+        lv_bar_set_value(telem_crew_bar, pct, LV_ANIM_OFF);
+        lv_color_t bar_col = (pct > 50) ? COL_NEON
+                           : (pct > 25) ? lv_color_hex(0xFFCC00)
+                                        : lv_color_hex(0xFF4444);
+        lv_obj_set_style_bg_color(telem_crew_bar, bar_col, LV_PART_INDICATOR);
+    }
+
+    // ── Ammunition bar ────────────────────────────────────────────────────────
+    if (telem_ammo_lbl) {
+        if (d.ammo >= 0) {
+            snprintf(buf, sizeof(buf), "%d", d.ammo);
+            lv_label_set_text(telem_ammo_lbl, buf);
+            lv_color_t a_col = (d.ammo < 5) ? lv_color_hex(0xFF4444) : COL_NEON;
+            lv_obj_set_style_text_color(telem_ammo_lbl, a_col, LV_PART_MAIN);
+        } else {
+            lv_label_set_text(telem_ammo_lbl, "--");
+        }
+    }
+    if (telem_ammo_bar && d.ammo >= 0) {
+        lv_bar_set_value(telem_ammo_bar, d.ammo, LV_ANIM_OFF);
+        lv_color_t a_col = (d.ammo > 10) ? COL_NEON
+                         : (d.ammo > 5)  ? lv_color_hex(0xFFCC00)
+                                         : lv_color_hex(0xFF4444);
+        lv_obj_set_style_bg_color(telem_ammo_bar, a_col, LV_PART_INDICATOR);
+    }
 }
 
 // ===== LVGL UPDATE - CARTE (main/M7 thread only) =====
@@ -762,11 +1299,13 @@ void setup() {
     Display.begin();
     TouchDetector.begin();
 
-    COL_DANGER = lv_color_hex(0x8B0000);
-    COL_ARMOR  = lv_color_hex(0x4A5D23);
-    COL_TECH   = lv_color_hex(0x2F4F4F);
-    COL_DARK   = lv_color_hex(0x111111);
-    COL_BAR    = lv_color_hex(0x1E1E1E);
+    // Palette Figma : vert neon sur fond tres sombre
+    COL_NEON   = lv_color_hex(0x39FF14);  // vert neon #39FF14
+    COL_DANGER = lv_color_hex(0xEF4444);  // rouge alerte
+    COL_ARMOR  = lv_color_hex(0x4A5D23);  // olive (conserve)
+    COL_TECH   = lv_color_hex(0x2F4F4F);  // bleu-gris (conserve)
+    COL_DARK   = lv_color_hex(0x051005);  // fond tres sombre #051005
+    COL_BAR    = lv_color_hex(0x0A1A0A);  // fond en-tete
 
     screen_buttons = lv_obj_create(NULL);
     screen_telem   = lv_obj_create(NULL);
@@ -818,6 +1357,22 @@ void loop() {
     if (do_telem) apply_telem_update(local_telem);
     if (do_map)   apply_map_update(local_map);
     if (do_img)   apply_map_image();
+
+    // ── Horloge (temps ecoule depuis le demarrage) ───────────────────────────
+    // Mise a jour toutes les secondes ; n'utilise pas de RTC, donc affiche le
+    // temps ecoule depuis la mise sous tension, pas l'heure reelle.
+    if (hud_time_lbl) {
+        static unsigned long last_tick = 0;
+        unsigned long now = millis();
+        if (now - last_tick >= 1000UL) {
+            last_tick = now;
+            unsigned long secs = now / 1000UL;
+            char tbuf[12];
+            snprintf(tbuf, sizeof(tbuf), "%02lu:%02lu:%02lu",
+                     secs / 3600UL, (secs % 3600UL) / 60UL, secs % 60UL);
+            lv_label_set_text(hud_time_lbl, tbuf);
+        }
+    }
 
     // ── Drive LVGL rendering and touch events ──
     lv_timer_handler();
