@@ -135,14 +135,20 @@ lv_color_t COL_TECH;
 lv_color_t COL_DARK;
 lv_color_t COL_BAR;
 
+// ===== DEFERRED HID DISPATCH =====
+// Callbacks write here; loop() sends after lv_timer_handler() so the USB
+// stack has a clean 5 ms window to flush before the next frame.
+// '\x01' = sentinel for KEY_SHIFT (no printable char).
+static volatile char g_pending_hid = '\0';
+
 // ===== CALLBACKS HID =====
-static void cb_extincteur(lv_event_t * e)  { Keyboard.printf("6"); }
-static void cb_fumigene(lv_event_t * e)    { Keyboard.printf("g"); }
-static void cb_artillerie(lv_event_t * e)  { Keyboard.printf("5"); }
-static void cb_jumelles(lv_event_t * e)    { Keyboard.printf("b"); }
-static void cb_sniper(lv_event_t * e)      { Keyboard.key_code(KEY_SHIFT); }
-static void cb_moteur(lv_event_t * e)      { Keyboard.printf("i"); }
-static void cb_reparation(lv_event_t * e)  { Keyboard.printf("f"); }
+static void cb_extincteur(lv_event_t * e)  { g_pending_hid = '6'; }
+static void cb_fumigene(lv_event_t * e)    { g_pending_hid = 'g'; }
+static void cb_artillerie(lv_event_t * e)  { g_pending_hid = '5'; }
+static void cb_jumelles(lv_event_t * e)    { g_pending_hid = 'b'; }
+static void cb_sniper(lv_event_t * e)      { g_pending_hid = '\x01'; }
+static void cb_moteur(lv_event_t * e)      { g_pending_hid = 'i'; }
+static void cb_reparation(lv_event_t * e)  { g_pending_hid = 'f'; }
 
 // ===== SWITCH D'ECRANS =====
 // LVGL 9: lv_scr_load_anim -> lv_screen_load_anim
@@ -815,6 +821,18 @@ void loop() {
 
     // ── Drive LVGL rendering and touch events ──
     lv_timer_handler();
+
+    // ── Deferred HID dispatch (after LVGL, before USB yield) ──
+    // Sending here — outside lv_timer_handler() — guarantees the USB stack
+    // gets a full 5 ms flush window for every key press.
+    {
+        char hid = g_pending_hid;
+        if (hid != '\0') {
+            g_pending_hid = '\0';
+            if (hid == '\x01') Keyboard.key_code(KEY_SHIFT);
+            else               Keyboard.printf("%c", hid);
+        }
+    }
 
     // ── Yield to USB stack and other Mbed RTOS tasks ──
     // 5 ms gives the USB HID endpoint time to flush between button presses,
