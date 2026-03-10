@@ -36,7 +36,6 @@ Arduino_GigaDisplayTouch TouchDetector;
 USBKeyboard Keyboard;
 
 // ===== ECRANS =====
-lv_obj_t * screen_splash;   // ecran de demarrage (detruit automatiquement apres la transition)
 lv_obj_t * screen_buttons;
 lv_obj_t * screen_telem;
 lv_obj_t * screen_map;
@@ -301,88 +300,6 @@ static lv_color_t color_for_type(char t) {
         case 'F': return lv_color_hex(0x555555);  // Gris  - aerodrome
         default:  return lv_color_hex(0x777777);  // Gris clair - inconnu
     }
-}
-
-// ===== CALLBACK SPLASH (ferme l'ecran de demarrage) =====
-// Declenche par un lv_timer 2 secondes apres le premier rendu.
-// auto_del=true dans lv_screen_load_anim supprime automatiquement screen_splash
-// (et tous ses widgets) apres la fin de l'animation de fondu.
-static void cb_splash_done(lv_timer_t * t) {
-    lv_timer_delete(t);
-    lv_screen_load_anim(screen_buttons, LV_SCR_LOAD_ANIM_FADE_IN, 500, 0, true);
-    screen_splash = NULL;  // pointeur invalide apres la suppression automatique par LVGL
-}
-
-// ===== ECRAN 0 : SPLASH DE DEMARRAGE =====
-// Fond creme / blanc casse avec une carte logo centree, comme un ecran de marque.
-// Affiche brievement au demarrage, puis laisse place a screen_buttons.
-void build_screen_splash() {
-    lv_obj_set_style_bg_color(screen_splash, lv_color_hex(0xF5F0E0), LV_PART_MAIN);
-
-    // Barre d'accent superieure (fine, sombre)
-    lv_obj_t * bar_top = lv_obj_create(screen_splash);
-    lv_obj_set_size(bar_top, 800, 6);
-    lv_obj_set_pos(bar_top, 0, 0);
-    lv_obj_set_style_bg_color(bar_top, lv_color_hex(0x111111), LV_PART_MAIN);
-    lv_obj_set_style_border_width(bar_top, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar_top, 0, LV_PART_MAIN);
-
-    // Barre d'accent inferieure
-    lv_obj_t * bar_bot = lv_obj_create(screen_splash);
-    lv_obj_set_size(bar_bot, 800, 6);
-    lv_obj_set_pos(bar_bot, 0, 474);
-    lv_obj_set_style_bg_color(bar_bot, lv_color_hex(0x111111), LV_PART_MAIN);
-    lv_obj_set_style_border_width(bar_bot, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar_bot, 0, LV_PART_MAIN);
-
-    // Carte logo (fond sombre, arrondie, centree)
-    lv_obj_t * card = lv_obj_create(screen_splash);
-    lv_obj_set_size(card, 360, 180);
-    lv_obj_align(card, LV_ALIGN_CENTER, 0, -20);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x111111), LV_PART_MAIN);
-    lv_obj_set_style_border_color(card, lv_color_hex(0x333333), LV_PART_MAIN);
-    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(card, 12, LV_PART_MAIN);
-    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Initiales "W T" espacees (element graphique logo)
-    lv_obj_t * lbl_wt = lv_label_create(card);
-    lv_label_set_text(lbl_wt, "W T");
-    lv_obj_set_style_text_color(lbl_wt, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_wt, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_letter_space(lbl_wt, 20, LV_PART_MAIN);
-    lv_obj_align(lbl_wt, LV_ALIGN_CENTER, 0, -22);
-
-    // Separateur interne de la carte
-    lv_obj_t * card_sep = lv_obj_create(card);
-    lv_obj_set_size(card_sep, 260, 1);
-    lv_obj_align(card_sep, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(card_sep, lv_color_hex(0x444444), LV_PART_MAIN);
-    lv_obj_set_style_border_width(card_sep, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(card_sep, 0, LV_PART_MAIN);
-
-    // "CONTROL HUB" (bas de la carte logo)
-    lv_obj_t * lbl_hub = lv_label_create(card);
-    lv_label_set_text(lbl_hub, "CONTROL HUB");
-    lv_obj_set_style_text_color(lbl_hub, lv_color_hex(0xCCCCCC), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_hub, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_letter_space(lbl_hub, 6, LV_PART_MAIN);
-    lv_obj_align(lbl_hub, LV_ALIGN_CENTER, 0, 22);
-
-    // "WAR THUNDER" sous la carte
-    lv_obj_t * lbl_game = lv_label_create(screen_splash);
-    lv_label_set_text(lbl_game, "WAR THUNDER");
-    lv_obj_set_style_text_color(lbl_game, lv_color_hex(0x222222), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_game, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_style_text_letter_space(lbl_game, 5, LV_PART_MAIN);
-    lv_obj_align(lbl_game, LV_ALIGN_CENTER, 0, 120);
-
-    // "Arduino GIGA R1 WiFi" en bas de l'ecran
-    lv_obj_t * lbl_hw = lv_label_create(screen_splash);
-    lv_label_set_text(lbl_hw, "Arduino GIGA R1 WiFi");
-    lv_obj_set_style_text_color(lbl_hw, lv_color_hex(0xAAAAAA), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl_hw, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_align(lbl_hw, LV_ALIGN_BOTTOM_MID, 0, -20);
 }
 
 // ===== ECRAN 1 : COMMANDES =====
@@ -966,19 +883,15 @@ void setup() {
     COL_DARK   = lv_color_hex(0x111111);
     COL_BAR    = lv_color_hex(0x1E1E1E);
 
-    screen_splash  = lv_obj_create(NULL);
     screen_buttons = lv_obj_create(NULL);
     screen_telem   = lv_obj_create(NULL);
     screen_map     = lv_obj_create(NULL);
 
-    build_screen_splash();
     build_screen_buttons();
     build_screen_telem();
     build_screen_map();
 
-    // Affiche le splash en premier ; cb_splash_done basculera vers screen_buttons apres 2 s.
-    lv_screen_load(screen_splash);
-    lv_timer_create(cb_splash_done, 2000, NULL);
+    lv_screen_load(screen_buttons);
 
     // Initialise le canal RPC M7 ↔ M4 après la construction complète de l'interface LVGL.
     // RPC.begin() démarre le M4 et initialise les files VirtIO OpenAMP depuis le tas Mbed
