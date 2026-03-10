@@ -748,6 +748,10 @@ static const size_t RPC_RECV_BUF_MAX = 512;
 // ===== SETUP =====
 void setup() {
     Serial.begin(115200);
+    // Initialise le canal inter-cœurs OpenAMP/RPMsg.
+    // DOIT être appelé avant tout autre begin() afin que le M4 puisse
+    // terminer son propre RPC.begin() sans se bloquer indéfiniment.
+    RPC.begin();
     // No setTimeout needed — the serial thread uses non-blocking reads
     Display.begin();
     TouchDetector.begin();

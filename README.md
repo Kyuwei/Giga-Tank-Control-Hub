@@ -1,8 +1,9 @@
 # 🎮 Giga Tank Control Hub
 
-> Panneau de commandes tactile militaire pour simulateurs de chars — **Arduino GIGA R1 WiFi** + **GIGA Display Shield**
+> Panneau de commandes tactile militaire pour simulateurs de chars — **Arduino GIGA R1 WiFi** + **GIGA Display Shield** ou **Interface Web React**
 
 ![Platform](https://img.shields.io/badge/Platform-Arduino%20GIGA%20R1%20WiFi-blue)
+![Web](https://img.shields.io/badge/Interface-React%20%2B%20Vite-61dafb)
 ![Shield](https://img.shields.io/badge/Shield-GIGA%20Display%20800x480-green)
 ![Game](https://img.shields.io/badge/Game-War%20Thunder-red)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
@@ -13,10 +14,12 @@
 
 Ce projet transforme un **Arduino GIGA R1 WiFi** équipé de son **GIGA Display Shield** (écran tactile 800×480 px) en un véritable panneau de commande de char, inspiré des systèmes de contrôle embarqués des chars modernes (M1A2 Abrams, Leopard 2, etc.).
 
-L'Arduino est reconnu par Windows comme un **clavier USB HID natif** (plug & play, sans driver). L'interface LVGL propose **trois écrans** :
-- **Écran 1 — Commandes** : 6 gros boutons tactiles + 1 bouton Réparation pour déclencher les raccourcis clavier du jeu.
-- **Écran 2 — Télémétrie** : Affichage en temps réel des données du véhicule (vitesse, RPM, rapport, équipage) lues depuis l'API locale de War Thunder via un script Python.
-- **Écran 3 — Carte Tactique** : Affichage en temps réel des objets de la minimap (alliés, ennemis, objectifs, aérodromes) sous forme de points colorés sur fond sombre.
+Une **interface web React** (style MFD phosphore vert) a été développée en parallèle via Figma Make. Elle remplace l'écran physique Arduino et peut être affichée sur n'importe quel navigateur (écran secondaire, tablette, fenêtre dédiée) tout en restant connectée en temps réel à War Thunder via un bridge Python local.
+
+Les deux interfaces proposent **trois vues** :
+- **Dashboard — Commandes** : Boutons tactiles pour déclencher les raccourcis clavier du jeu.
+- **Télémétrie** : Affichage en temps réel des données du véhicule (vitesse, RPM, rapport, équipage) lues depuis l'API locale de War Thunder.
+- **Carte Tactique** : Affichage en temps réel des objets de la minimap (alliés, ennemis, objectifs) avec image de fond.
 
 ---
 
@@ -29,34 +32,88 @@ Giga-Tank-Control-Hub/
 ├── Control_Hub_M4/
 │   └── Control_Hub_M4.ino            <- Sketch M4 (parsing télémétrie + RPC)
 ├── pc_bridge/
-│   └── wt_telemetry.py               <- Script Python (API War Thunder -> Serial)
+│   ├── wt_telemetry.py               <- Bridge Arduino : API War Thunder -> Serial
+│   └── wt_web_bridge.py              <- Bridge Web    : API WT + commandes clavier -> HTTP
+├── Interface_Figma/                  <- Interface web React (remplace l'écran Arduino)
+│   ├── src/app/
+│   │   ├── Dashboard.tsx             <- Panneau commandes MFD
+│   │   ├── VehicleStatus.tsx         <- Télémétrie véhicule live
+│   │   ├── TacticalMap.tsx           <- Carte tactique live
+│   │   └── api.ts                    <- Client HTTP vers wt_web_bridge
+│   └── package.json
 └── README.md
 ```
 
-### Rôles des deux cœurs
+### Deux modes d'utilisation
 
-| Cœur | Rôle |
-|---|---|
-| **Cortex-M7** (480 MHz) | Interface LVGL (800×480), clavier USB HID, lecture Serial USB, démarrage du M4 |
-| **Cortex-M4** (240 MHz) | Parsing des trames télémétriques, calcul du texte HUD, renvoi des valeurs structurées au M7 |
+| Mode | Matériel | Script Python | Description |
+|---|---|---|---|
+| **Arduino** | GIGA R1 + Display Shield | `wt_telemetry.py` | Interface LVGL tactile sur écran physique 800×480 |
+| **Web** | PC + navigateur | `wt_web_bridge.py` | Interface React dans un navigateur (écran secondaire, tablette) |
 
-**Flux de données :**
+### Architecture Web (nouveau)
+
 ```
-Python bridge
-    │  USB Serial
+War Thunder (127.0.0.1:8111)
+    │  HTTP polling (10 Hz)
     ▼
-  M7 (loop)
-    │  RPC stream (ligne brute)          Raw data affiché immédiatement
+  wt_web_bridge.py (localhost:8112)
+    │  HTTP + CORS
     ▼
-  M4 (loop) — parse_telemetry()
-    │  RPC stream ("PARSED|SPD:…|…")
-    ▼
-  M7 — apply_parsed() → LVGL widgets
+  Interface React (localhost:5173)
+    └─ Dashboard  → POST /api/command → keyboard.send() → WT reçoit la touche
+    └─ VehicleStatus → GET /api/telemetry → données live
+    └─ TacticalMap → GET /api/map + /api/map/image → marqueurs + fond
 ```
 
 ---
 
-## 🛒 Matériel requis
+## 🌐 Interface Web (React)
+
+L'interface web est un remplacement de l'écran Arduino. Elle tourne dans un navigateur et se connecte à War Thunder via `wt_web_bridge.py`.
+
+### Prérequis
+
+```bash
+# Bridge Python
+pip install flask flask-cors keyboard requests
+
+# Interface React (depuis le dossier Interface_Figma/)
+npm install
+```
+
+> **Note Windows** : Le module `keyboard` nécessite des droits administrateur pour injecter des frappes clavier globalement. Lancez le bridge depuis un terminal en mode Administrateur.
+
+### Lancement
+
+**1. Démarrer le bridge web :**
+```bash
+# Depuis la racine du projet
+python pc_bridge/wt_web_bridge.py
+```
+Le serveur démarre sur `http://localhost:8112`.
+
+**2. Démarrer l'interface React :**
+```bash
+cd Interface_Figma
+npm run dev
+```
+Ouvrez `http://localhost:5173` dans un navigateur (ou dans une fenêtre dédiée sur un écran secondaire).
+
+**3. Lancer War Thunder** et entrer dans une partie avec un char.
+
+### Fonctionnement des commandes
+
+Quand vous appuyez sur un bouton du Dashboard :
+1. L'interface React envoie `POST http://localhost:8112/api/command` avec `{ "key": "G" }`
+2. Le bridge Python reçoit la requête et appelle `keyboard.send("g")`
+3. La touche est injectée globalement → War Thunder reçoit l'entrée
+
+Le statut du bridge est visible dans la barre d'en-tête du Dashboard (icône WiFi).
+
+---
+
+## 🖥️ Interface Arduino LVGL (legacy) (mode Arduino)
 
 | Composant | Référence | Description |
 |---|---|---|

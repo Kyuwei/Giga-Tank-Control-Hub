@@ -1,9 +1,56 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { ArrowLeft, Users, Crosshair, Gauge, Activity, Shield } from "lucide-react";
 import { useNavigate } from "react-router";
+import {
+  fetchTelemetry,
+  extractVehicleName,
+  type WtTelemetry,
+} from "../api";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function crewBar(current?: number, total?: number) {
+  if (current === undefined || total === undefined || total === 0) return null;
+  const pct = Math.round((current / total) * 100);
+  return { current, total, pct };
+}
+
+function gearLabel(gear?: number | string): string {
+  if (gear === undefined || gear === null) return "—";
+  if (String(gear) === "0") return "N";
+  if (String(gear).startsWith("-") || gear === "R") return "R";
+  return String(gear);
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export function VehicleStatus() {
   const navigate = useNavigate();
+  const [data, setData] = useState<WtTelemetry | null>(null);
+  const [online, setOnline] = useState(false);
+
+  // Poll bridge every 500 ms
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      const t = await fetchTelemetry();
+      if (!alive) return;
+      if (t && !t.error) { setData(t); setOnline(true); }
+      else { setOnline(false); }
+    };
+    poll();
+    const id = setInterval(poll, 500);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  // Derived values
+  const speed       = data?.speed  !== undefined ? Math.abs(Math.round(data.speed))  : "—";
+  const rpm         = data?.rpm    !== undefined ? Math.round(data.rpm)               : "—";
+  const gear        = gearLabel(data?.gear);
+  const fuel        = data?.fuel   !== undefined ? Math.round(data.fuel)              : null;
+  const ammo        = data?.first_stage_ammo;
+  const crew        = crewBar(data?.crew_current, data?.crew_total);
+  const vehicleName = extractVehicleName(data?.type) || "M1A2 SEP v3";
 
   return (
     <div className="flex items-center justify-center w-full h-screen bg-black select-none p-2 sm:p-4">
@@ -28,13 +75,15 @@ export function VehicleStatus() {
             </button>
             <div className="flex flex-col">
               <span className="text-[#39ff14]/60 text-sm">DIAGNOSTICS</span>
-              <span className="animate-pulse text-[#39ff14]">RUNNING</span>
+              {online
+                ? <span className="animate-pulse text-[#39ff14]">LIVE</span>
+                : <span className="text-red-500/80">BRIDGE OFFLINE</span>}
             </div>
           </div>
           
           <div className="text-right">
             <div className="text-[#39ff14]/60 text-sm tracking-widest">VEHICLE TELEMETRY</div>
-            <div className="text-xl tracking-wider">M1A2 SEP v3</div>
+            <div className="text-xl tracking-wider">{vehicleName}</div>
           </div>
         </div>
 
@@ -49,19 +98,38 @@ export function VehicleStatus() {
                 <Users className="text-[#39ff14]" size={20} />
                 <h2 className="text-lg tracking-widest font-bold">CREW STATUS</h2>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                {[
-                  { role: "COMMANDER", status: "OK", color: "text-[#39ff14]" },
-                  { role: "GUNNER", status: "OK", color: "text-[#39ff14]" },
-                  { role: "LOADER", status: "OK", color: "text-[#39ff14]" },
-                  { role: "DRIVER", status: "OK", color: "text-[#39ff14]" }
-                ].map((crew) => (
-                  <div key={crew.role} className="flex justify-between items-center border border-[#39ff14]/20 p-2">
-                    <span className="text-[#39ff14]/70 text-sm">{crew.role}</span>
-                    <span className={`font-bold ${crew.color}`}>{crew.status}</span>
+              {crew ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-end">
+                    <span className="text-[#39ff14]/70 text-sm">PERSONNEL</span>
+                    <span className={`text-2xl font-bold ${crew.current < crew.total ? "text-red-400" : "text-[#39ff14]"}`}>
+                      {crew.current} / {crew.total}
+                    </span>
                   </div>
-                ))}
-              </div>
+                  <div className="w-full h-3 bg-[#39ff14]/20 border border-[#39ff14]/30">
+                    <div
+                      className={`h-full transition-all ${crew.pct > 50 ? "bg-[#39ff14]" : crew.pct > 25 ? "bg-yellow-400" : "bg-red-500"}`}
+                      style={{ width: `${crew.pct}%` }}
+                    />
+                  </div>
+                  <div className="text-right text-xs text-[#39ff14]/50 font-mono">{crew.pct}% OPERATIONAL</div>
+                  <div className="flex justify-between items-center border-t border-[#39ff14]/20 pt-2">
+                    <span className="text-[#39ff14]/70 text-sm">STABILIZER</span>
+                    <span className={`font-bold text-sm ${data?.stabilizer ? "text-[#39ff14]" : "text-[#39ff14]/40"}`}>
+                      {data?.stabilizer ? "ARMED" : "—"}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  {["COMMANDER","GUNNER","LOADER","DRIVER"].map((role) => (
+                    <div key={role} className="flex justify-between items-center border border-[#39ff14]/20 p-2">
+                      <span className="text-[#39ff14]/70 text-sm">{role}</span>
+                      <span className="font-bold text-[#39ff14]/40">—</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Ammunition */}
@@ -73,30 +141,23 @@ export function VehicleStatus() {
               <div className="space-y-3">
                 <div className="flex flex-col">
                   <div className="flex justify-between items-end mb-1">
-                    <span className="text-sm">APFSDS (M829A4)</span>
-                    <span className="text-xl font-bold">22</span>
+                    <span className="text-sm">MAIN ROUND (1ST STAGE)</span>
+                    <span className={`text-xl font-bold ${ammo !== undefined && ammo < 5 ? "text-red-400 animate-pulse" : ""}`}>
+                      {ammo ?? "—"}
+                    </span>
                   </div>
-                  <div className="w-full h-2 bg-[#39ff14]/20">
-                    <div className="h-full bg-[#39ff14]" style={{ width: '55%' }}></div>
-                  </div>
+                  {ammo !== undefined && (
+                    <div className="w-full h-2 bg-[#39ff14]/20">
+                      <div
+                        className={`h-full ${ammo > 10 ? "bg-[#39ff14]" : ammo > 5 ? "bg-yellow-400" : "bg-red-500"}`}
+                        style={{ width: `${Math.min(100, (ammo / 40) * 100)}%` }}
+                      />
+                    </div>
+                  )}
                 </div>
-                <div className="flex flex-col">
-                  <div className="flex justify-between items-end mb-1">
-                    <span className="text-sm">HEAT-MP-T (M830A1)</span>
-                    <span className="text-xl font-bold">14</span>
-                  </div>
-                  <div className="w-full h-2 bg-[#39ff14]/20">
-                    <div className="h-full bg-[#39ff14]" style={{ width: '35%' }}></div>
-                  </div>
-                </div>
-                <div className="flex justify-between items-center border-t border-[#39ff14]/20 pt-2 mt-4 text-[#39ff14]/70">
-                  <span>COAX 7.62mm</span>
-                  <span className="font-mono">8500 / 10000</span>
-                </div>
-                <div className="flex justify-between items-center text-[#39ff14]/70">
-                  <span>.50 CAL (CROWS)</span>
-                  <span className="font-mono">800 / 900</span>
-                </div>
+                <p className="text-[#39ff14]/30 text-xs tracking-wider italic pt-2">
+                  Secondary ammo counters not exposed by WT API.
+                </p>
               </div>
             </div>
           </div>
@@ -112,23 +173,23 @@ export function VehicleStatus() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="border border-[#39ff14]/20 p-4 flex flex-col items-center justify-center relative">
                   <span className="text-[#39ff14]/50 text-xs absolute top-2 left-2">SPEED</span>
-                  <span className="text-4xl font-bold mt-2">42</span>
+                  <span className="text-4xl font-bold mt-2">{speed}</span>
                   <span className="text-xs text-[#39ff14]/70">KM/H</span>
                 </div>
                 <div className="border border-[#39ff14]/20 p-4 flex flex-col items-center justify-center relative">
                   <span className="text-[#39ff14]/50 text-xs absolute top-2 left-2">RPM</span>
-                  <span className="text-4xl font-bold mt-2">1850</span>
-                  <span className="text-xs text-[#39ff14]/70">TURBINE</span>
+                  <span className="text-4xl font-bold mt-2">{rpm}</span>
+                  <span className="text-xs text-[#39ff14]/70">ENGINE</span>
                 </div>
                 <div className="border border-[#39ff14]/20 p-4 flex flex-col items-center justify-center relative">
                   <span className="text-[#39ff14]/50 text-xs absolute top-2 left-2">GEAR</span>
-                  <span className="text-4xl font-bold mt-2">4</span>
-                  <span className="text-xs text-[#39ff14]/70">FORWARD</span>
+                  <span className="text-4xl font-bold mt-2">{gear}</span>
+                  <span className="text-xs text-[#39ff14]/70">CURRENT</span>
                 </div>
                 <div className="border border-[#39ff14]/20 p-4 flex flex-col items-center justify-center relative">
                   <span className="text-[#39ff14]/50 text-xs absolute top-2 left-2">FUEL</span>
-                  <span className="text-4xl font-bold mt-2">78</span>
-                  <span className="text-xs text-[#39ff14]/70">% (JP-8)</span>
+                  <span className="text-4xl font-bold mt-2">{fuel ?? "—"}</span>
+                  <span className="text-xs text-[#39ff14]/70">{fuel !== null ? "%" : "N/A"}</span>
                 </div>
               </div>
             </div>
@@ -166,9 +227,12 @@ export function VehicleStatus() {
 
         {/* Bottom Bar */}
         <div className="border-t-2 border-[#39ff14]/50 pt-2 mt-4 flex justify-between shrink-0 text-sm tracking-widest text-[#39ff14]/80">
-          <div className="flex items-center gap-2"><Activity size={16}/> SENSORS ACTIVE</div>
-          <div>BMS: CONNECTED</div>
-          <div>STAB: DUAL-AXIS ON</div>
+          <div className="flex items-center gap-2">
+            <Activity size={16} />
+            {online ? "TELEMETRY: LIVE" : "TELEMETRY: BRIDGE OFFLINE"}
+          </div>
+          <div>BMS: {online ? "CONNECTED" : "—"}</div>
+          <div>STAB: {data?.stabilizer ? "DUAL-AXIS ON" : "—"}</div>
         </div>
       </div>
     </div>

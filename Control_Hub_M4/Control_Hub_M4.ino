@@ -77,29 +77,15 @@ static String parse_telemetry(const String& data) {
 
 // ===== SETUP =====
 void setup() {
+    // Initialise le canal inter-coeurs OpenAMP/RPMsg cote M4.
+    // Le M7 appelle egalement RPC.begin() dans son setup() ; sans cela
+    // le M4 se bloque indefiniment en attendant l'acknowledgment du M7.
     RPC.begin();
-    rpcBuffer.reserve(RPC_BUF_MAX);
 }
 
 // ===== LOOP =====
 void loop() {
-    // Read raw telemetry lines forwarded by M7 over the RPC stream.
-    // Accumulate characters until '\n', then parse and reply.
-    while (RPC.available()) {
-        char c = (char)RPC.read();
-        if (c == '\n') {
-            rpcBuffer.trim();
-            if (rpcBuffer.length() > 0) {
-                String result = parse_telemetry(rpcBuffer);
-                RPC.println(result);
-            }
-            rpcBuffer = "";
-        } else {
-            if (rpcBuffer.length() < RPC_BUF_MAX) {
-                rpcBuffer += c;
-            } else {
-                rpcBuffer = "";  // Discard runaway frame
-            }
-        }
-    }
+    // Le M7 gere desormais le parsing de la telemetrie dans son propre
+    // thread Mbed RTOS (serial_task). Le M4 n'a plus de role actif.
+    delay(100);
 }

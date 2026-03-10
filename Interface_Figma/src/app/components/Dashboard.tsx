@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router";
 import { 
   CloudFog, 
@@ -11,13 +11,17 @@ import {
   Ruler, 
   Target, 
   Cable,
-  Activity
+  Activity,
+  Wifi,
+  WifiOff
 } from "lucide-react";
 import { MfdButton } from "./MfdButton";
+import { sendCommand, checkBridgeHealth } from "../api";
 
 export function Dashboard() {
   const navigate = useNavigate();
   const [time, setTime] = useState(new Date().toLocaleTimeString('en-US', { hour12: false }));
+  const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -26,10 +30,29 @@ export function Dashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  const handleCommand = (command: string) => {
-    console.log(`Command triggered via USB HID: ${command}`);
-    // In a real environment, this might call an API to tell the host device to send a keystroke.
-  };
+  // Poll bridge health every 3 s
+  useEffect(() => {
+    let alive = true;
+    const check = async () => {
+      const ok = await checkBridgeHealth();
+      if (alive) setBridgeOnline(ok);
+    };
+    check();
+    const id = setInterval(check, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const handleCommand = useCallback(async (key: string) => {
+    if (!bridgeOnline) {
+      console.warn(`Bridge offline — cannot send key "${key}"`);
+      return;
+    }
+    try {
+      await sendCommand(key);
+    } catch (err) {
+      console.error("sendCommand error:", err);
+    }
+  }, [bridgeOnline]);
 
   return (
     <div className="flex items-center justify-center w-full h-screen bg-black select-none p-2 sm:p-4">
@@ -51,8 +74,18 @@ export function Dashboard() {
               <span className="animate-pulse text-[#39ff14]">ONLINE</span>
             </div>
             <div className="flex flex-col">
-              <span className="text-[#39ff14]/60 text-sm">USB HID</span>
-              <span className="text-[#39ff14]">ACTIVE</span>
+              <span className="text-[#39ff14]/60 text-sm">BRIDGE</span>
+              {bridgeOnline === null ? (
+                <span className="text-[#39ff14]/50">INIT...</span>
+              ) : bridgeOnline ? (
+                <span className="flex items-center gap-1 text-[#39ff14]">
+                  <Wifi size={14} /> ACTIVE
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-red-500 animate-pulse">
+                  <WifiOff size={14} /> OFFLINE
+                </span>
+              )}
             </div>
           </div>
           
@@ -151,7 +184,11 @@ export function Dashboard() {
 
         {/* Bottom Bar */}
         <div className="border-t-2 border-[#39ff14]/50 pt-2 mt-4 flex justify-between shrink-0 text-sm tracking-widest text-[#39ff14]/80">
-          <div>DATA LINK: ESTABLISHED</div>
+          <div>
+            {bridgeOnline
+              ? "BRIDGE: READY"
+              : "BRIDGE: START wt_web_bridge.py"}
+          </div>
           <div className="flex gap-4">
             <div className="px-4 border border-[#39ff14]/30 bg-[#39ff14]/10">L1</div>
             <div className="px-4 border border-[#39ff14]/30 bg-[#39ff14]/10">L2</div>
