@@ -13,15 +13,22 @@ import {
   Cable,
   Activity,
   Wifi,
-  WifiOff
+  WifiOff,
 } from "lucide-react";
 import { MfdButton } from "./MfdButton";
-import { sendCommand, checkBridgeHealth } from "../api";
+import {
+  sendCommand,
+  checkBridgeHealth,
+  fetchTelemetry,
+  extractVehicleName,
+  type WtTelemetry,
+} from "../api";
 
 export function Dashboard() {
   const navigate = useNavigate();
   const [time, setTime] = useState(new Date().toLocaleTimeString('en-US', { hour12: false }));
   const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
+  const [telemetry, setTelemetry] = useState<WtTelemetry | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -30,7 +37,7 @@ export function Dashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  // Poll bridge health every 3 s
+  // Poll bridge health every 3 s (lightweight)
   useEffect(() => {
     let alive = true;
     const check = async () => {
@@ -39,6 +46,18 @@ export function Dashboard() {
     };
     check();
     const id = setInterval(check, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  // Poll telemetry every 500 ms
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      const t = await fetchTelemetry();
+      if (alive) setTelemetry(t && !t.error ? t : null);
+    };
+    poll();
+    const id = setInterval(poll, 500);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
@@ -54,14 +73,20 @@ export function Dashboard() {
     }
   }, [bridgeOnline]);
 
+  // Derived telemetry values
+  const wtOnline    = telemetry !== null;
+  const ammo        = telemetry?.first_stage_ammo;
+  const crewCurrent = telemetry?.crew_current;
+  const crewTotal   = telemetry?.crew_total;
+  const vehicleName = extractVehicleName(telemetry?.type);
+  const stabOn      = Boolean(telemetry?.stabilizer);
+
   return (
     <div className="flex items-center justify-center w-full h-screen bg-black select-none p-2 sm:p-4">
       {/* Container simulating the display */}
       <div 
         className="relative w-full h-full max-w-6xl bg-[#051005] border-4 border-[#103010] rounded-xl overflow-hidden p-4 shadow-[0_0_50px_rgba(57,255,20,0.1)] flex flex-col"
-        style={{
-          boxShadow: "inset 0 0 100px rgba(0, 50, 0, 0.8)",
-        }}
+        style={{ boxShadow: "inset 0 0 100px rgba(0, 50, 0, 0.8)" }}
       >
         {/* CRT Scanline overlay */}
         <div className="absolute inset-0 pointer-events-none opacity-20 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] bg-[length:100%_4px,3px_100%] z-50"></div>
@@ -87,6 +112,12 @@ export function Dashboard() {
                 </span>
               )}
             </div>
+            <div className="flex flex-col">
+              <span className="text-[#39ff14]/60 text-sm">WAR THUNDER</span>
+              <span className={wtOnline ? "text-[#39ff14]" : "text-[#39ff14]/30"}>
+                {wtOnline ? "IN MATCH" : "STANDBY"}
+              </span>
+            </div>
           </div>
           
           <div className="flex-1 flex justify-center gap-4">
@@ -107,79 +138,80 @@ export function Dashboard() {
           </div>
           
           <div className="text-right">
-            <div className="text-[#39ff14]/60 text-sm tracking-widest">M1A2 ABRAMS MFD // TACTICAL HUB</div>
+            <div className="text-[#39ff14]/60 text-sm tracking-widest">
+              {wtOnline ? vehicleName : "MFD"} // TACTICAL HUB
+            </div>
             <div className="text-2xl tracking-wider">{time}</div>
           </div>
         </div>
 
         {/* Main Area */}
         <div className="flex-1 flex gap-2 md:gap-4 overflow-hidden mt-4">
-
           {/* Main Grid */}
           <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 md:gap-4 overflow-auto pb-2 pr-2">
-          <MfdButton 
-            icon={<Power size={48} />} 
-            label="ENGINE" 
-            subLabel="START/STOP (I)"
-            onClick={() => handleCommand('I')} 
-          />
-          <MfdButton 
-            icon={<CloudFog size={48} />} 
-            label="SMOKE" 
-            subLabel="DEPLOY (G)"
-            onClick={() => handleCommand('G')} 
-            alert
-          />
-          <MfdButton 
-            icon={<Crosshair size={48} />} 
-            label="ARTILLERY" 
-            subLabel="CALL (5)"
-            onClick={() => handleCommand('5')} 
-            alert
-          />
-          <MfdButton 
-            icon={<Flame size={48} />} 
-            label="EXTINGUISHER" 
-            subLabel="FPE (6)"
-            onClick={() => handleCommand('6')} 
-          />
-          <MfdButton 
-            icon={<Eye size={48} />} 
-            label="THERMAL / NVD" 
-            subLabel="TOGGLE (N)"
-            onClick={() => handleCommand('N')} 
-          />
-          <MfdButton 
-            icon={<Binoculars size={48} />} 
-            label="BINOCULARS" 
-            subLabel="VIEW (B)"
-            onClick={() => handleCommand('B')} 
-          />
-          <MfdButton 
-            icon={<Ruler size={48} />} 
-            label="RANGEFINDER" 
-            subLabel="MEASURE (R)"
-            onClick={() => handleCommand('R')} 
-          />
-          <MfdButton 
-            icon={<Target size={48} />} 
-            label="TRACK TARGET" 
-            subLabel="LOCK (X)"
-            onClick={() => handleCommand('X')} 
-          />
-          <MfdButton 
-            icon={<Cable size={48} />} 
-            label="TOW CABLE" 
-            subLabel="ATTACH (0)"
-            onClick={() => handleCommand('0')} 
-          />
-          <MfdButton 
-            icon={<MapIcon size={48} />} 
-            label="ARTY STRIKE" 
-            subLabel="COORDS (M+CLK)"
-            onClick={() => handleCommand('M')} 
-          />
-        </div>
+            <MfdButton 
+              icon={<Power size={48} />} 
+              label="ENGINE" 
+              subLabel="START/STOP (I)"
+              onClick={() => handleCommand('I')} 
+            />
+            <MfdButton 
+              icon={<CloudFog size={48} />} 
+              label="SMOKE" 
+              subLabel="DEPLOY (G)"
+              onClick={() => handleCommand('G')} 
+              alert
+            />
+            <MfdButton 
+              icon={<Crosshair size={48} />} 
+              label="ARTILLERY" 
+              subLabel="CALL (5)"
+              onClick={() => handleCommand('5')} 
+              alert
+            />
+            <MfdButton 
+              icon={<Flame size={48} />} 
+              label="EXTINGUISHER" 
+              subLabel="FPE (6)"
+              onClick={() => handleCommand('6')} 
+            />
+            <MfdButton 
+              icon={<Eye size={48} />} 
+              label="THERMAL / NVD" 
+              subLabel="TOGGLE (N)"
+              onClick={() => handleCommand('N')} 
+            />
+            <MfdButton 
+              icon={<Binoculars size={48} />} 
+              label="BINOCULARS" 
+              subLabel="VIEW (B)"
+              onClick={() => handleCommand('B')} 
+            />
+            <MfdButton 
+              icon={<Ruler size={48} />} 
+              label="RANGEFINDER" 
+              subLabel="MEASURE (R)"
+              onClick={() => handleCommand('R')} 
+            />
+            <MfdButton 
+              icon={<Target size={48} />} 
+              label="TRACK TARGET" 
+              subLabel="LOCK (X)"
+              onClick={() => handleCommand('X')} 
+            />
+            <MfdButton 
+              icon={<Cable size={48} />} 
+              label="TOW CABLE" 
+              subLabel="ATTACH (0)"
+              onClick={() => handleCommand('0')} 
+            />
+            <MfdButton 
+              icon={<MapIcon size={48} />} 
+              label="ARTY STRIKE" 
+              subLabel="COORDS (M+CLK)"
+              onClick={() => handleCommand('M')} 
+            />
+          </div>
         </div>
 
         {/* Bottom Bar */}
@@ -194,7 +226,234 @@ export function Dashboard() {
             <div className="px-4 border border-[#39ff14]/30 bg-[#39ff14]/10">L2</div>
             <div className="px-4 border border-[#39ff14]/30 bg-[#39ff14]/10">L3</div>
           </div>
-          <div>ARMAMENT: HOT</div>
+          <div className="flex gap-4">
+            <span className={ammo !== undefined && ammo < 5 ? "text-red-400 animate-pulse" : ""}>
+              AMMO: {ammo !== undefined ? ammo : "—"}
+            </span>
+            <span>|</span>
+            <span className={crewCurrent !== undefined && crewTotal !== undefined && crewCurrent < crewTotal ? "text-red-400" : ""}>
+              CREW: {crewCurrent !== undefined && crewTotal !== undefined ? `${crewCurrent}/${crewTotal}` : "—"}
+            </span>
+            <span>|</span>
+            <span className={stabOn ? "text-[#39ff14]" : "text-[#39ff14]/40"}>
+              STAB: {wtOnline ? (stabOn ? "ON" : "OFF") : "—"}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+  return (
+    <div className="flex items-center justify-center w-full h-screen bg-black select-none p-2 sm:p-4">
+      {/* Container simulating the display */}
+      <div 
+        className="relative w-full h-full max-w-6xl bg-[#051005] border-4 border-[#103010] rounded-xl overflow-hidden p-4 shadow-[0_0_50px_rgba(57,255,20,0.1)] flex flex-col"
+        style={{ boxShadow: "inset 0 0 100px rgba(0, 50, 0, 0.8)" }}
+      >
+        {/* CRT Scanline overlay */}
+        <div className="absolute inset-0 pointer-events-none opacity-20 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] bg-[length:100%_4px,3px_100%] z-50"></div>
+
+        {/* Top Header/Status Bar */}
+        <div className="flex justify-between items-end border-b-2 border-[#39ff14]/50 pb-2 mb-4 shrink-0">
+          <div className="flex gap-6 text-xl">
+            <div className="flex flex-col">
+              <span className="text-[#39ff14]/60 text-sm">SYSTEM</span>
+              <span className="animate-pulse text-[#39ff14]">ONLINE</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[#39ff14]/60 text-sm">BRIDGE</span>
+              {bridgeOnline === null ? (
+                <span className="text-[#39ff14]/50">INIT...</span>
+              ) : bridgeOnline ? (
+                <span className="flex items-center gap-1 text-[#39ff14]"><Wifi size={14} /> ACTIVE</span>
+              ) : (
+                <span className="flex items-center gap-1 text-red-500 animate-pulse"><WifiOff size={14} /> OFFLINE</span>
+              )}
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[#39ff14]/60 text-sm">WAR THUNDER</span>
+              <span className={wtOnline ? "text-[#39ff14]" : "text-[#39ff14]/30"}>
+                {wtOnline ? "IN MATCH" : "STANDBY"}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex-1 flex justify-center gap-4">
+            <button
+              className="px-6 py-2 border-2 border-[#39ff14] text-[#39ff14] hover:bg-[#39ff14]/20 active:bg-[#39ff14]/40 transition-colors shadow-[0_0_15px_rgba(57,255,20,0.3)] hover:shadow-[0_0_20px_rgba(57,255,20,0.5)] flex items-center gap-2 font-bold tracking-widest"
+              onClick={() => navigate('/map')}
+            >
+              <MapIcon size={20} /> TACTICAL MAP
+            </button>
+            <button
+              className="px-6 py-2 border-2 border-[#39ff14] text-[#39ff14] hover:bg-[#39ff14]/20 active:bg-[#39ff14]/40 transition-colors shadow-[0_0_15px_rgba(57,255,20,0.3)] hover:shadow-[0_0_20px_rgba(57,255,20,0.5)] flex items-center gap-2 font-bold tracking-widest"
+              onClick={() => navigate('/status')}
+            >
+              <Activity size={20} /> SYS STATUS
+            </button>
+          </div>
+
+          <div className="text-right">
+            <div className="text-[#39ff14]/60 text-sm tracking-widest">
+              {wtOnline ? vehicleName : "MFD"} // TACTICAL HUB
+            </div>
+            <div className="text-2xl tracking-wider">{time}</div>
+          </div>
+        </div>
+
+        {/* Main Area */}
+        <div className="flex-1 flex gap-4 overflow-hidden">
+
+          {/* MFD Buttons Grid */}
+          <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 md:gap-4 overflow-auto pb-2 content-start">
+            <MfdButton icon={<Power size={48} />}     label="ENGINE"       subLabel="START/STOP (I)" onClick={() => handleCommand('I')} />
+            <MfdButton icon={<CloudFog size={48} />}  label="SMOKE"        subLabel="DEPLOY (G)"     onClick={() => handleCommand('G')} alert />
+            <MfdButton icon={<Crosshair size={48} />} label="ARTILLERY"    subLabel="CALL (5)"       onClick={() => handleCommand('5')} alert />
+            <MfdButton icon={<Flame size={48} />}     label="EXTINGUISHER" subLabel="FPE (6)"        onClick={() => handleCommand('6')} />
+            <MfdButton icon={<Eye size={48} />}       label="THERMAL / NVD" subLabel="TOGGLE (N)"   onClick={() => handleCommand('N')} />
+            <MfdButton icon={<Binoculars size={48} />} label="BINOCULARS"  subLabel="VIEW (B)"       onClick={() => handleCommand('B')} />
+            <MfdButton icon={<Ruler size={48} />}     label="RANGEFINDER"  subLabel="MEASURE (R)"   onClick={() => handleCommand('R')} />
+            <MfdButton icon={<Target size={48} />}    label="TRACK TARGET" subLabel="LOCK (X)"      onClick={() => handleCommand('X')} />
+            <MfdButton icon={<Cable size={48} />}     label="TOW CABLE"    subLabel="ATTACH (0)"    onClick={() => handleCommand('0')} />
+            <MfdButton icon={<MapIcon size={48} />}   label="ARTY STRIKE"  subLabel="COORDS (M)"    onClick={() => handleCommand('M')} />
+          </div>
+
+          {/* Live Telemetry Sidebar */}
+          <div className="w-44 shrink-0 flex flex-col gap-3 overflow-hidden">
+
+            {/* Speed */}
+            <div className="border-2 border-[#39ff14]/30 bg-[#0a1a0a] p-3 flex flex-col items-center relative">
+              <Gauge size={14} className="absolute top-2 left-2 text-[#39ff14]/50" />
+              <span className="text-[#39ff14]/50 text-xs tracking-widest mt-1">SPEED</span>
+              <span className="text-4xl font-bold leading-none mt-1">
+                {speed !== null ? speed : <span className="text-[#39ff14]/20">—</span>}
+              </span>
+              <span className="text-xs text-[#39ff14]/60 mt-1">KM/H</span>
+            </div>
+
+            {/* RPM + Gear */}
+            <div className="border-2 border-[#39ff14]/30 bg-[#0a1a0a] p-3 flex flex-col gap-2">
+              <div className="flex justify-between items-center">
+                <span className="text-[#39ff14]/50 text-xs tracking-widest">RPM</span>
+                <span className="text-lg font-bold font-mono">
+                  {rpm !== null ? rpm : <span className="text-[#39ff14]/20">—</span>}
+                </span>
+              </div>
+              <div className="w-full h-1 bg-[#39ff14]/10">
+                <div
+                  className="h-full bg-[#39ff14] transition-all"
+                  style={{ width: rpm !== null ? `${Math.min(100, (rpm / 3000) * 100)}%` : "0%" }}
+                />
+              </div>
+              <div className="flex justify-between items-center border-t border-[#39ff14]/20 pt-2">
+                <span className="text-[#39ff14]/50 text-xs tracking-widest">GEAR</span>
+                <span className="text-2xl font-bold">{gear}</span>
+              </div>
+            </div>
+
+            {/* Ammo */}
+            <div className="border-2 border-[#39ff14]/30 bg-[#0a1a0a] p-3 flex flex-col items-center relative">
+              <Crosshair size={14} className="absolute top-2 left-2 text-[#39ff14]/50" />
+              <span className="text-[#39ff14]/50 text-xs tracking-widest mt-1">AMMO</span>
+              <span className={`text-4xl font-bold leading-none mt-1 ${ammo !== undefined && ammo < 5 ? "text-red-400 animate-pulse" : ""}`}>
+                {ammo !== undefined ? ammo : <span className="text-[#39ff14]/20">—</span>}
+              </span>
+              <span className="text-xs text-[#39ff14]/60 mt-1">1ST STAGE</span>
+              {ammo !== undefined && (
+                <div className="w-full h-1 bg-[#39ff14]/10 mt-2">
+                  <div
+                    className={`h-full transition-all ${ammo > 10 ? "bg-[#39ff14]" : ammo > 5 ? "bg-yellow-400" : "bg-red-500"}`}
+                    style={{ width: `${Math.min(100, (ammo / 40) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Fuel */}
+            <div className="border-2 border-[#39ff14]/30 bg-[#0a1a0a] p-3 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[#39ff14]/50 text-xs tracking-widest flex items-center gap-1">
+                  <Fuel size={12} /> FUEL
+                </span>
+                <span className="font-bold font-mono text-lg">
+                  {fuel !== null ? `${fuel}%` : <span className="text-[#39ff14]/20">—</span>}
+                </span>
+              </div>
+              <div className="w-full h-2 bg-[#39ff14]/10 border border-[#39ff14]/20">
+                <div
+                  className={`h-full transition-all ${
+                    fuel === null ? "" :
+                    fuel > 40 ? "bg-[#39ff14]" :
+                    fuel > 15 ? "bg-yellow-400" : "bg-red-500 animate-pulse"
+                  }`}
+                  style={{ width: fuel !== null ? `${fuel}%` : "0%" }}
+                />
+              </div>
+            </div>
+
+            {/* Crew */}
+            <div className="border-2 border-[#39ff14]/30 bg-[#0a1a0a] p-3 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[#39ff14]/50 text-xs tracking-widest flex items-center gap-1">
+                  <Users size={12} /> CREW
+                </span>
+                <span className={`font-bold font-mono text-lg ${
+                  crewCurrent !== undefined && crewTotal !== undefined && crewCurrent < crewTotal
+                    ? "text-red-400"
+                    : ""
+                }`}>
+                  {crewCurrent !== undefined && crewTotal !== undefined
+                    ? `${crewCurrent}/${crewTotal}`
+                    : <span className="text-[#39ff14]/20">—</span>}
+                </span>
+              </div>
+              {crewCurrent !== undefined && crewTotal !== undefined && crewTotal > 0 && (
+                <div className="w-full h-2 bg-[#39ff14]/10 border border-[#39ff14]/20">
+                  <div
+                    className={`h-full transition-all ${
+                      crewCurrent / crewTotal > 0.5 ? "bg-[#39ff14]" :
+                      crewCurrent / crewTotal > 0.25 ? "bg-yellow-400" : "bg-red-500"
+                    }`}
+                    style={{ width: `${(crewCurrent / crewTotal) * 100}%` }}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Stabilizer */}
+            <div className={`border-2 p-3 flex items-center justify-between ${
+              telemetry?.stabilizer ? "border-[#39ff14]/60 bg-[#39ff14]/10" : "border-[#39ff14]/20 bg-[#0a1a0a]"
+            }`}>
+              <span className="text-[#39ff14]/50 text-xs tracking-widest flex items-center gap-1">
+                <ShieldAlert size={12} /> STAB
+              </span>
+              <span className={`font-bold text-sm tracking-widest ${telemetry?.stabilizer ? "text-[#39ff14]" : "text-[#39ff14]/20"}`}>
+                {telemetry?.stabilizer ? "ARMED" : "OFF"}
+              </span>
+            </div>
+
+          </div>
+        </div>
+
+        {/* Bottom Bar */}
+        <div className="border-t-2 border-[#39ff14]/50 pt-2 mt-4 flex justify-between shrink-0 text-sm tracking-widest text-[#39ff14]/80">
+          <div>
+            {bridgeOnline ? "BRIDGE: READY" : "BRIDGE: START wt_web_bridge.py"}
+          </div>
+          <div className="flex gap-4">
+            <div className="px-4 border border-[#39ff14]/30 bg-[#39ff14]/10">L1</div>
+            <div className="px-4 border border-[#39ff14]/30 bg-[#39ff14]/10">L2</div>
+            <div className="px-4 border border-[#39ff14]/30 bg-[#39ff14]/10">L3</div>
+          </div>
+          <div className={ammo !== undefined && ammo < 5 ? "text-red-400 animate-pulse" : ""}>
+            AMMO: {ammo !== undefined ? ammo : "—"} | CREW: {
+              crewCurrent !== undefined && crewTotal !== undefined
+                ? `${crewCurrent}/${crewTotal}`
+                : "—"
+            }
+          </div>
         </div>
       </div>
     </div>

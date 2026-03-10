@@ -25,20 +25,22 @@ Note: The `keyboard` module may require running as administrator on
 Windows to inject keystrokes globally.
 """
 
+import os
 import threading
 import time
 
 import keyboard
 import requests
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-PORT      = 8112
-WT_BASE   = "http://127.0.0.1:8111"
-POLL_HZ   = 10          # How often the cache worker polls the WT API
-TIMEOUT   = 0.5         # Seconds before a WT API request is abandoned
+PORT       = 8112
+WT_BASE    = "http://127.0.0.1:8111"
+POLL_HZ    = 10          # How often the cache worker polls the WT API
+TIMEOUT    = 0.5         # Seconds before a WT API request is abandoned
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 # ─── In-memory cache ──────────────────────────────────────────────────────────
 
@@ -89,9 +91,18 @@ def _cache_worker():
 
 # ─── Flask app ─────────────────────────────────────────────────────────────────
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 # Allow any localhost origin (React dev on :5173, built app on :4173, etc.)
 CORS(app, resources={r"/api/*": {"origins": ["http://localhost:*", "http://127.0.0.1:*"]}})
+
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_frontend(path: str):
+    """Serve the built React app. Falls back to index.html for SPA routing."""
+    if path and os.path.exists(os.path.join(STATIC_DIR, path)):
+        return send_from_directory(STATIC_DIR, path)
+    return send_from_directory(STATIC_DIR, "index.html")
 
 
 @app.route("/api/health")

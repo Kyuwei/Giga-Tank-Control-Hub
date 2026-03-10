@@ -17,6 +17,12 @@ export default defineConfig({
     },
   },
 
+  // Output the production build into pc_bridge/static so Flask can serve it.
+  build: {
+    outDir: '../pc_bridge/static',
+    emptyOutDir: true,
+  },
+
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
 })

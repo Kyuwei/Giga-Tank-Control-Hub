@@ -201,26 +201,28 @@ export function VehicleStatus() {
                 <h2 className="text-lg tracking-widest font-bold">MODULE INTEGRITY</h2>
               </div>
               <div className="space-y-2">
-                {[
-                  { name: "ENGINE", integrity: 100 },
-                  { name: "TRANSMISSION", integrity: 100 },
-                  { name: "TURRET DRIVE", integrity: 100 },
-                  { name: "GUN BARREL", integrity: 100 },
-                  { name: "TRACK L", integrity: 85 },
-                  { name: "TRACK R", integrity: 90 },
-                ].map((mod) => (
-                  <div key={mod.name} className="flex items-center gap-4 text-sm">
-                    <span className="w-32 text-[#39ff14]/70">{mod.name}</span>
-                    <div className="flex-1 h-3 bg-[#39ff14]/20 border border-[#39ff14]/30">
-                      <div 
-                        className={`h-full ${mod.integrity > 50 ? 'bg-[#39ff14]' : 'bg-red-500'} transition-all`} 
-                        style={{ width: `${mod.integrity}%` }}
-                      ></div>
-                    </div>
-                    <span className="w-10 text-right font-mono">{mod.integrity}%</span>
+                {/* Engine fire indicator — exposed by WT API */}
+                <div className="flex items-center gap-4 text-sm">
+                  <span className="w-32 text-[#39ff14]/70">ENGINE FIRE</span>
+                  <div className="flex-1 flex items-center">
+                    {data?.engine_on_fire
+                      ? <span className="text-red-500 animate-pulse font-bold tracking-widest">⚠ ON FIRE</span>
+                      : <span className={online ? "text-[#39ff14]" : "text-[#39ff14]/30"}>NOMINAL</span>}
                   </div>
-                ))}
+                </div>
+                {/* Stabilizer */}
+                <div className="flex items-center gap-4 text-sm">
+                  <span className="w-32 text-[#39ff14]/70">STABILIZER</span>
+                  <div className="flex-1">
+                    <span className={data?.stabilizer ? "text-[#39ff14] font-bold" : "text-[#39ff14]/30"}>
+                      {online ? (data?.stabilizer ? "ARMED" : "STANDBY") : "—"}
+                    </span>
+                  </div>
+                </div>
               </div>
+              <p className="text-[#39ff14]/25 text-xs tracking-wider italic pt-6 border-t border-[#39ff14]/10 mt-4">
+                Individual module damage is not exposed by the WT indicators API.
+              </p>
             </div>
           </div>
         </div>
