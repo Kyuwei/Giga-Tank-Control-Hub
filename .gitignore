@@ -1,2 +1,5 @@
 __pycache__/
 .vscode/arduino.json
+Interface_Figma/node_modules/
+Interface_Figma/package-lock.json
+pc_bridge/static/
