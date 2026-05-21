@@ -113,6 +113,8 @@ def extract_tank_data(d):
     # Extract short tank name from model path (e.g. "tankModels/us_m1a2_abrams" -> "US_M1A2_ABRAMS")
     raw_type   = d.get("type", "UNKNOWN")
     tank_name  = raw_type.split("/")[-1].upper() if "/" in raw_type else raw_type.upper()
+    # Neutralise '|', '\n', '\r' which would corrupt the Arduino-side parser.
+    tank_name  = tank_name.replace("|", "_").replace("\n", "_").replace("\r", "_")
 
     return int(speed_kmh), int(rpm), gear, ammo, stab, crew, crew_total, tank_name, fuel
 

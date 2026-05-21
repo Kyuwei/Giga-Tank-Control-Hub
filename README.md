@@ -28,9 +28,7 @@ Les deux interfaces proposent **trois vues** :
 ```
 Giga-Tank-Control-Hub/
 ├── Control_Hub_War_Thunder/
-│   └── Control_Hub_War_Thunder.ino   <- Sketch M7 (LVGL + USB HID + RPC)
-├── Control_Hub_M4/
-│   └── Control_Hub_M4.ino            <- Sketch M4 (parsing télémétrie + RPC)
+│   └── Control_Hub_War_Thunder.ino   <- Sketch Arduino (LVGL + USB HID + Serial)
 ├── pc_bridge/
 │   ├── wt_telemetry.py               <- Bridge Arduino : API War Thunder -> Serial
 │   └── wt_web_bridge.py              <- Bridge Web    : API WT + commandes clavier -> HTTP
@@ -125,17 +123,7 @@ Le statut du bridge est visible dans la barre d'en-tête du Dashboard (icône Wi
 
 ## ⚙️ Installation
 
-### 1. Flash Split (requis pour le dual-core)
-
-Avant de flasher quoi que ce soit, configurez la répartition de la mémoire flash dans Arduino IDE :
-
-**Arduino IDE → Tools → Flash Split**, puis sélectionnez :
-- **1MB M7 + 1MB M4** (recommandé — partage équilibré)
-- **1.5MB M7 + 0.5MB M4** (si le M7 a besoin de plus d'espace)
-
-> ⚠️ Cette étape est indispensable. Sans Flash Split, le M4 n'a pas d'espace de stockage et ne peut pas être programmé.
-
-### 2. Arduino IDE — Bibliothèques
+### 1. Arduino IDE — Bibliothèques
 
 1. Installez **Arduino IDE 2.x**.
 2. Dans le gestionnaire de cartes, installez : `Arduino Mbed OS Giga Boards`.
@@ -144,25 +132,17 @@ Avant de flasher quoi que ce soit, configurez la répartition de la mémoire fla
    - `Arduino_GigaDisplayTouch`
    - `lvgl` (**version 9.5 requise**)
    - `PluggableUSBHID` (incluse dans le pack Mbed)
-   - `RPC` (incluse dans le pack Mbed — communication inter-cœur)
 
-### 3. Upload du sketch M7 (cœur principal)
+> Le sketch tourne sur un seul cœur (M7). Le partage Flash Split entre M7 et M4 n'est pas nécessaire : laissez la configuration par défaut d'Arduino IDE.
+
+### 2. Upload du sketch
 
 1. **Tools → Target Core → Main Core**
 2. Ouvrez `Control_Hub_War_Thunder/Control_Hub_War_Thunder.ino`.
 3. Sélectionnez la carte **Arduino GIGA R1 WiFi** et le bon port COM.
 4. Flashez.
 
-### 4. Upload du sketch M4 (co-processeur)
-
-1. **Tools → Target Core → M4 Co-processor**
-2. Ouvrez `Control_Hub_M4/Control_Hub_M4.ino`.
-3. Sélectionnez la même carte et le même port COM.
-4. Flashez.
-
-> Le M7 démarre automatiquement le M4 via `RPC.begin()` au démarrage. Il n'est pas nécessaire de re-flasher le M7 après avoir flashé le M4.
-
-### 5. Script Python (pont télémétrique)
+### 3. Script Python (pont télémétrique)
 
 ```bash
 pip install requests pyserial

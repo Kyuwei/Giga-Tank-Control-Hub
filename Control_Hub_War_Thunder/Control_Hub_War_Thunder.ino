@@ -1,25 +1,16 @@
 // ============================================================
-// Control_Hub_War_Thunder — Cortex-M7 main sketch
+// Control_Hub_War_Thunder — Arduino GIGA R1 sketch (single-core, M7)
 // Target core : Main Core  (Tools → Target Core → Main Core)
 //
-// Dual-core overview:
-//   This sketch runs on the M7 and owns the display (LVGL), the USB HID
-//   keyboard, and the USB Serial connection to the Python bridge.
-//   It boots the M4 co-processor via RPC.begin() and delegates all
-//   telemetry parsing to it:
+// Overview:
+//   Runs on the M7 and owns the display (LVGL), the USB HID keyboard,
+//   and the USB Serial connection to the Python bridge (wt_telemetry.py).
 //
-//     1. Raw telemetry lines from Serial (Python) are forwarded to the M4
-//        with RPC.println().
-//     2. The M4 parses each line and sends back a compact "PARSED|…" frame
-//        over the same bidirectional RPC stream.
-//     3. apply_parsed() reads those frames and updates the LVGL widgets.
-//
-//   See Control_Hub_M4/Control_Hub_M4.ino for the co-processor sketch.
-//
-// Flash split (Arduino IDE → Tools → Flash Split):
-//   "1MB M7 + 1MB M4"  or  "1.5MB M7 + 0.5MB M4"
-//   Upload the M7 sketch first, then switch to M4 Co-processor and upload
-//   Control_Hub_M4.ino.
+//   A dedicated Mbed RTOS thread (g_serial_thread) reads bytes from
+//   Serial, assembles lines, parses them, and writes plain-data structs
+//   protected by g_data_mutex. The main loop (LVGL + touch + HID) reads
+//   those structs and updates the widgets — LVGL is never touched from
+//   the serial thread.
 // ============================================================
 
 #include "Arduino_H7_Video.h"
@@ -28,7 +19,6 @@
 #include "PluggableUSBHID.h"
 #include "USBKeyboard.h"
 #include "mbed.h"
-#include "RPC.h"
 
 // ===== HARDWARE =====
 Arduino_H7_Video Display(800, 480, GigaDisplayShield);
@@ -1206,7 +1196,7 @@ static void apply_map_image() {
     lv_obj_invalidate(map_bg_img);
 }
 
-// ===== THREAD SERIE (role M4 : donnees & reseau) =====
+// ===== THREAD SERIE (lecture & parsing) =====
 // Runs at osPriorityHigh. Reads bytes from Serial, assembles lines, parses
 // them into the shared structs, and signals the main loop via the update
 // flags. LVGL is never touched here.
@@ -1290,17 +1280,9 @@ void serial_task() {
     }
 }
 
-// ===== RPC RECEIVE BUFFER (M4 → M7 parsed frames) =====
-static String rpcRecvBuffer = "";
-static const size_t RPC_RECV_BUF_MAX = 512;
-
 // ===== SETUP =====
 void setup() {
     Serial.begin(115200);
-    // Initialise le canal inter-cœurs OpenAMP/RPMsg.
-    // DOIT être appelé avant tout autre begin() afin que le M4 puisse
-    // terminer son propre RPC.begin() sans se bloquer indéfiniment.
-    RPC.begin();
     // No setTimeout needed — the serial thread uses non-blocking reads
     Display.begin();
     TouchDetector.begin();

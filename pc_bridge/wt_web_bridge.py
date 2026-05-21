@@ -191,4 +191,6 @@ if __name__ == "__main__":
     t = threading.Thread(target=_cache_worker, daemon=True)
     t.start()
 
-    app.run(host="localhost", port=PORT, debug=False, use_reloader=False)
+    # 127.0.0.1 explicit: "localhost" can resolve to IPv6 first on some systems,
+    # which mismatches Flask's IPv4 bind and causes intermittent "connection refused".
+    app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
