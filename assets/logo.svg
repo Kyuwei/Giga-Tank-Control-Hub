@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="480" height="480">
+  <title>Giga Tank Control Hub</title>
+  <!-- Background fragments (impact / motion lines) -->
+  <polygon points="2,12 6,8 4,4" fill="#b71c1c"/>
+  <polygon points="42,6 46,10 44,14" fill="#b71c1c"/>
+  <polygon points="3,40 7,42 5,46" fill="#b71c1c"/>
+  <polygon points="44,40 46,44 42,46" fill="#b71c1c"/>
+  <polygon points="24,2 26,5 22,5" fill="#b71c1c"/>
+
+  <!-- Tank body (hull) -->
+  <path fill="#fafafa" d="M5,32 L5,38 L7,40 L41,40 L43,38 L43,32 Z"/>
+
+  <!-- Tracks (top/bottom rails of the hull, drawn as separate strip) -->
+  <path fill="#b71c1c" d="M4,38 L4,42 L8,44 L40,44 L44,42 L44,38 L42,38 L42,41 L40,42 L8,42 L6,41 L6,38 Z"/>
+
+  <!-- Road wheels (circles along the track) -->
+  <circle cx="9"  cy="40" r="1.6" fill="#fafafa"/>
+  <circle cx="14" cy="40" r="1.6" fill="#fafafa"/>
+  <circle cx="19" cy="40" r="1.6" fill="#fafafa"/>
+  <circle cx="24" cy="40" r="1.6" fill="#fafafa"/>
+  <circle cx="29" cy="40" r="1.6" fill="#fafafa"/>
+  <circle cx="34" cy="40" r="1.6" fill="#fafafa"/>
+  <circle cx="39" cy="40" r="1.6" fill="#fafafa"/>
+
+  <!-- Turret -->
+  <path fill="#fafafa" d="M14,22 L14,32 L34,32 L34,22 L30,18 L18,18 Z"/>
+
+  <!-- Cannon barrel -->
+  <rect x="33" y="23" width="13" height="3" fill="#fafafa"/>
+  <rect x="44" y="22" width="2"  height="5" fill="#fafafa"/>
+
+  <!-- Commander cupola -->
+  <rect x="22" y="14" width="6" height="5" fill="#fafafa"/>
+  <rect x="23" y="11" width="1" height="3" fill="#b71c1c"/>
+
+  <!-- Hull detail line -->
+  <rect x="6" y="34" width="36" height="1" fill="#b71c1c"/>
+</svg>

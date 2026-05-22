@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+encode_icons.py
+===============
+Generates the C header used by the Arduino sketch to display vector-ish icons
+on the tactical map (instead of plain coloured circles).
+
+Each icon is rasterised by Pillow at 20x20 RGB565 with a transparent background
+flattened against the dark hub colour, and emitted as a static PROGMEM array.
+
+Icons emitted (matching the 8 entity codes used by the serial protocol):
+  A : tank ally     (green)      T : tank ally     (alias for richer protocol)
+  E : tank enemy    (red)        t : tank enemy
+  P : aircraft ally (green)      p : aircraft enemy
+  O : objective     (yellow)
+  F : airfield      (cyan-grey)
+  B : bomb point    (red bullseye)
+  R : respawn       (blue)
+  N : unknown       (light grey)
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+REPO_ROOT  = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+HEADER_OUT = os.path.join(REPO_ROOT, "Control_Hub_War_Thunder", "map_icons.h")
+
+ICON_SIZE  = 20
+BG_HEX     = "#0A1A0A"   # matches the map_container fill (#060F06 close enough)
+
+COLOURS = {
+    "tank_ally":     (0x00, 0xCC, 0x00),
+    "tank_enemy":    (0xFF, 0x22, 0x00),
+    "aircraft_ally": (0x00, 0xCC, 0x00),
+    "aircraft_enemy":(0xFF, 0x22, 0x00),
+    "objective":     (0xFA, 0xCC, 0x15),
+    "airfield":      (0x60, 0xA5, 0xFA),
+    "bomb_point":    (0xEF, 0x44, 0x44),
+    "respawn":       (0x39, 0x6A, 0xFA),
+    "unknown":       (0xAA, 0xAA, 0xAA),
+}
+
+
+def bg_rgb() -> tuple[int, int, int]:
+    return int(BG_HEX[1:3], 16), int(BG_HEX[3:5], 16), int(BG_HEX[5:7], 16)
+
+
+def new_canvas() -> Image.Image:
+    return Image.new("RGB", (ICON_SIZE, ICON_SIZE), bg_rgb())
+
+
+def draw_tank(colour) -> Image.Image:
+    img = new_canvas()
+    d = ImageDraw.Draw(img)
+    # tracks
+    d.rectangle([2, 13, 17, 16], fill=colour)
+    # hull
+    d.rectangle([3, 8, 16, 13], fill=colour)
+    # turret
+    d.rectangle([7, 5, 12, 9], fill=colour)
+    # barrel
+    d.rectangle([12, 7, 18, 8], fill=colour)
+    return img
+
+
+def draw_aircraft(colour) -> Image.Image:
+    img = new_canvas()
+    d = ImageDraw.Draw(img)
+    # fuselage (vertical) — points up
+    d.polygon([(10, 1), (12, 13), (8, 13)], fill=colour)
+    # wings (horizontal)
+    d.polygon([(1, 9), (19, 9), (15, 11), (5, 11)], fill=colour)
+    # tail
+    d.polygon([(7, 15), (13, 15), (12, 18), (8, 18)], fill=colour)
+    return img
+
+
+def draw_objective(colour) -> Image.Image:
+    img = new_canvas()
+    d = ImageDraw.Draw(img)
+    # flag pole
+    d.rectangle([4, 2, 6, 18], fill=colour)
+    # flag triangle
+    d.polygon([(6, 3), (17, 6), (6, 9)], fill=colour)
+    return img
+
+
+def draw_airfield(colour) -> Image.Image:
+    img = new_canvas()
+    d = ImageDraw.Draw(img)
+    # diagonal runway band
+    d.polygon([(2, 17), (5, 17), (17, 2), (14, 2)], fill=colour)
+    # tower
+    d.rectangle([15, 12, 18, 18], fill=colour)
+    return img
+
+
+def draw_bomb_point(colour) -> Image.Image:
+    img = new_canvas()
+    d = ImageDraw.Draw(img)
+    cx, cy = 10, 10
+    # outer ring
+    d.ellipse([cx - 8, cy - 8, cx + 8, cy + 8], outline=colour, width=2)
+    # cross-hair
+    d.line([(cx, cy - 9), (cx, cy + 9)], fill=colour, width=2)
+    d.line([(cx - 9, cy), (cx + 9, cy)], fill=colour, width=2)
+    # centre dot
+    d.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=colour)
+    return img
+
+
+def draw_respawn(colour) -> Image.Image:
+    img = new_canvas()
+    d = ImageDraw.Draw(img)
+    cx, cy = 10, 10
+    d.ellipse([cx - 7, cy - 7, cx + 7, cy + 7], outline=colour, width=2)
+    # downward arrow inside
+    d.polygon([(cx - 4, cy - 2), (cx + 4, cy - 2), (cx, cy + 5)], fill=colour)
+    return img
+
+
+def draw_unknown(colour) -> Image.Image:
+    img = new_canvas()
+    d = ImageDraw.Draw(img)
+    cx, cy = 10, 10
+    d.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=colour)
+    return img
+
+
+ICONS = [
+    ("tank_ally",      draw_tank,       COLOURS["tank_ally"]),
+    ("tank_enemy",     draw_tank,       COLOURS["tank_enemy"]),
+    ("aircraft_ally",  draw_aircraft,   COLOURS["aircraft_ally"]),
+    ("aircraft_enemy", draw_aircraft,   COLOURS["aircraft_enemy"]),
+    ("objective",      draw_objective,  COLOURS["objective"]),
+    ("airfield",       draw_airfield,   COLOURS["airfield"]),
+    ("bomb_point",     draw_bomb_point, COLOURS["bomb_point"]),
+    ("respawn",        draw_respawn,    COLOURS["respawn"]),
+    ("unknown",        draw_unknown,    COLOURS["unknown"]),
+]
+
+
+def image_to_rgb565_le(img: Image.Image) -> bytes:
+    arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
+    r, g, b = arr[..., 0], arr[..., 1], arr[..., 2]
+    v = ((r.astype(np.uint16) >> 3) << 11) \
+      | ((g.astype(np.uint16) >> 2) <<  5) \
+      | ( b.astype(np.uint16) >> 3)
+    out = np.empty(v.size * 2, dtype=np.uint8)
+    out[0::2] = (v & 0xFF).flatten()
+    out[1::2] = ((v >> 8) & 0xFF).flatten()
+    return out.tobytes()
+
+
+def main() -> int:
+    lines = []
+    lines.append("// Auto-generated by scripts/encode_icons.py — do not edit by hand.")
+    lines.append("#pragma once")
+    lines.append("")
+    lines.append('#include "lvgl.h"')
+    lines.append("")
+    lines.append(f"#define MAP_ICON_W  {ICON_SIZE}")
+    lines.append(f"#define MAP_ICON_H  {ICON_SIZE}")
+    lines.append("")
+
+    for name, fn, colour in ICONS:
+        img = fn(colour)
+        data = image_to_rgb565_le(img)
+        lines.append(f"// {name} ({len(data)} bytes)")
+        lines.append(f"static const uint8_t icon_{name}_data[] __attribute__((aligned(4))) = {{")
+        chunk = 16
+        for i in range(0, len(data), chunk):
+            row = ", ".join(f"0x{b:02X}" for b in data[i:i + chunk])
+            lines.append(f"    {row},")
+        lines.append("};")
+        lines.append(f"static const lv_image_dsc_t icon_{name}_dsc = {{")
+        lines.append("    .header = {")
+        lines.append("        .magic  = LV_IMAGE_HEADER_MAGIC,")
+        lines.append("        .cf     = LV_COLOR_FORMAT_RGB565,")
+        lines.append("        .flags  = 0,")
+        lines.append(f"        .w      = {ICON_SIZE},")
+        lines.append(f"        .h      = {ICON_SIZE},")
+        lines.append(f"        .stride = {ICON_SIZE * 2},")
+        lines.append("    },")
+        lines.append(f"    .data_size = {len(data)},")
+        lines.append(f"    .data      = icon_{name}_data,")
+        lines.append("};")
+        lines.append("")
+
+    lines.append("// Map single-character type codes to icon descriptors.")
+    lines.append("// T/A = tank ally, t/E = tank enemy, P = aircraft ally, p = aircraft enemy,")
+    lines.append("// O = objective, F = airfield, B = bomb point, R = respawn, N = unknown.")
+    lines.append("static const lv_image_dsc_t * icon_for_type(char c) {")
+    lines.append("    switch (c) {")
+    lines.append("        case 'A': case 'T': return &icon_tank_ally_dsc;")
+    lines.append("        case 'E': case 't': return &icon_tank_enemy_dsc;")
+    lines.append("        case 'P':           return &icon_aircraft_ally_dsc;")
+    lines.append("        case 'p':           return &icon_aircraft_enemy_dsc;")
+    lines.append("        case 'O':           return &icon_objective_dsc;")
+    lines.append("        case 'F':           return &icon_airfield_dsc;")
+    lines.append("        case 'B':           return &icon_bomb_point_dsc;")
+    lines.append("        case 'R':           return &icon_respawn_dsc;")
+    lines.append("        default:            return &icon_unknown_dsc;")
+    lines.append("    }")
+    lines.append("}")
+    lines.append("")
+
+    with open(HEADER_OUT, "w") as f:
+        f.write("\n".join(lines))
+    print(f"Wrote {HEADER_OUT} ({len(ICONS)} icons, {ICON_SIZE}x{ICON_SIZE})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

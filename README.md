@@ -1,6 +1,8 @@
-# 🎮 Giga Tank Control Hub
+<p align="center"><img src="assets/logo.svg" width="220" alt="Giga Tank Control Hub"></p>
 
-> Panneau de commandes tactile militaire pour simulateurs de chars — **Arduino GIGA R1 WiFi** + **GIGA Display Shield** ou **Interface Web React**
+# Giga Tank Control Hub
+
+> Panneau de télémétrie tactique militaire pour simulateurs de chars — **Arduino GIGA R1 WiFi** + **GIGA Display Shield** ou **Interface Web React**
 
 ![Platform](https://img.shields.io/badge/Platform-Arduino%20GIGA%20R1%20WiFi-blue)
 ![Web](https://img.shields.io/badge/Interface-React%20%2B%20Vite-61dafb)
@@ -10,35 +12,54 @@
 
 ---
 
-## 📋 Description
+## Description (V2 — read-only)
 
-Ce projet transforme un **Arduino GIGA R1 WiFi** équipé de son **GIGA Display Shield** (écran tactile 800×480 px) en un véritable panneau de commande de char, inspiré des systèmes de contrôle embarqués des chars modernes (M1A2 Abrams, Leopard 2, etc.).
+Ce projet transforme un **Arduino GIGA R1 WiFi** équipé de son **GIGA Display Shield** (écran tactile 800×480 px) en un cockpit de télémétrie passif, inspiré des MFD (Multi-Function Displays) embarqués des chars modernes.
 
-Une **interface web React** (style MFD phosphore vert) a été développée en parallèle via Figma Make. Elle remplace l'écran physique Arduino et peut être affichée sur n'importe quel navigateur (écran secondaire, tablette, fenêtre dédiée) tout en restant connectée en temps réel à War Thunder via un bridge Python local.
+Une **interface web React** (style MFD phosphore vert) est disponible en parallèle. Elle s'affiche dans un navigateur (écran secondaire, tablette) et lit les mêmes données via le bridge Python local.
 
-Les deux interfaces proposent **trois vues** :
-- **Dashboard — Commandes** : Boutons tactiles pour déclencher les raccourcis clavier du jeu.
-- **Télémétrie** : Affichage en temps réel des données du véhicule (vitesse, RPM, rapport, équipage) lues depuis l'API locale de War Thunder.
-- **Carte Tactique** : Affichage en temps réel des objets de la minimap (alliés, ennemis, objectifs) avec image de fond.
+### Changements V2
+
+- **USB HID supprimé.** Les frappes clavier passaient 1 fois sur 2 dans War Thunder à cause de DirectInput/RawInput — le hub est désormais **passif en lecture seule**.
+- **Splash screen** au démarrage (logo + barre de progression, 2,5 s).
+- **Carte tactique** : icônes vectorielles (tank/avion/objectif/aérodrome/bomb point/respawn) avec orientation calculée depuis `ex`/`ey`, au lieu de simples points colorés.
+- **Module Integrity dynamique** : santé des 6 modules (ENGINE / TRANSMISSION / TURRET / BARREL / TRACK L / TRACK R) reconstruite par parsing de `/hudmsg`, avec reset à chaque changement de carte.
+- **Event Feed** live : kills, dégâts et alertes affichés en flux temps réel.
+- **Performances** : conversion RGB565 vectorisée en NumPy (~50× plus rapide), élimination des `String` Arduino (zéro fragmentation heap), correction d'une race condition sur le tampon image, `delay(1)` au lieu de `delay(5)` dans la boucle principale.
+
+### Trois écrans
+
+1. **OVERVIEW** : vitals (DRIVER/GUNNER/CREW), warnings (FIRE/OVERSPEED/LWS/IRCM/AMMO/FUEL), drivetrain compact (vitesse/RPM/gear/fuel), event feed live.
+2. **VEHICLE STATUS** : télémétrie détaillée + 6 barres de module integrity dynamiques.
+3. **TACTICAL MAP** : carte plein écran avec fond depuis WT, anneaux radar, icônes vectorielles tournées selon l'orientation.
 
 ---
 
-## 🏗️ Architecture du projet
+## Architecture
 
 ```
 Giga-Tank-Control-Hub/
+├── assets/
+│   └── logo.svg                            # Logo source (rouge/blanc)
+├── scripts/
+│   ├── svg_to_rgb565.py                    # Génère splash_image.h depuis le SVG
+│   └── encode_icons.py                     # Génère map_icons.h (8 icônes RGB565)
 ├── Control_Hub_War_Thunder/
-│   └── Control_Hub_War_Thunder.ino   <- Sketch Arduino (LVGL + USB HID + Serial)
+│   ├── Control_Hub_War_Thunder.ino         # Sketch principal (LVGL + Serial)
+│   ├── splash_image.h                      # Logo 280×280 PROGMEM (généré)
+│   └── map_icons.h                         # 9 icônes 20×20 PROGMEM (généré)
 ├── pc_bridge/
-│   ├── wt_telemetry.py               <- Bridge Arduino : API War Thunder -> Serial
-│   └── wt_web_bridge.py              <- Bridge Web    : API WT + commandes clavier -> HTTP
-├── Interface_Figma/                  <- Interface web React (remplace l'écran Arduino)
-│   ├── src/app/
-│   │   ├── Dashboard.tsx             <- Panneau commandes MFD
-│   │   ├── VehicleStatus.tsx         <- Télémétrie véhicule live
-│   │   ├── TacticalMap.tsx           <- Carte tactique live
-│   │   └── api.ts                    <- Client HTTP vers wt_web_bridge
-│   └── package.json
+│   ├── wt_telemetry.py                     # Bridge Arduino : WT API → Serial
+│   └── wt_web_bridge.py                    # Bridge Web : WT API + HUDMSG → HTTP
+├── Interface_Figma/                        # Interface web React
+│   └── src/app/
+│       ├── App.tsx, routes.ts, api.ts
+│       └── components/
+│           ├── Dashboard.tsx               # Écran 1 : overview
+│           ├── VehicleStatus.tsx           # Écran 2 : status
+│           ├── TacticalMap.tsx             # Écran 3 : map
+│           ├── EventFeed.tsx               # Composant feed événements
+│           └── MapIcon.tsx                 # Icône carte mémoisée
 └── README.md
 ```
 
@@ -46,417 +67,216 @@ Giga-Tank-Control-Hub/
 
 | Mode | Matériel | Script Python | Description |
 |---|---|---|---|
-| **Arduino** | GIGA R1 + Display Shield | `wt_telemetry.py` | Interface LVGL tactile sur écran physique 800×480 |
-| **Web** | PC + navigateur | `wt_web_bridge.py` | Interface React dans un navigateur (écran secondaire, tablette) |
+| **Arduino** | GIGA R1 + Display Shield | `wt_telemetry.py` | Interface LVGL 800×480 sur écran physique |
+| **Web** | PC + navigateur | `wt_web_bridge.py` | Interface React (localhost:5173 ou `pc_bridge/static`) |
 
-### Architecture Web (nouveau)
+### Pourquoi mono-cœur ?
+
+Le sketch tourne intégralement sur le M7. Une expérimentation antérieure (PR #13) avait tenté de déporter le parsing sur le M4 via RPC : la latence inter-cœur (~5-10 ms par requête) dépassait le gain local. Le M4 reste donc disponible pour de futures charges (touch pre-processing, watchdog dédié) mais n'est pas utilisé pour l'instant.
+
+### Architecture Web
 
 ```
 War Thunder (127.0.0.1:8111)
     │  HTTP polling (10 Hz)
     ▼
-  wt_web_bridge.py (localhost:8112)
+  wt_web_bridge.py (localhost:8112) — lecture seule
     │  HTTP + CORS
     ▼
   Interface React (localhost:5173)
-    └─ Dashboard  → POST /api/command → keyboard.send() → WT reçoit la touche
-    └─ VehicleStatus → GET /api/telemetry → données live
-    └─ TacticalMap → GET /api/map + /api/map/image → marqueurs + fond
+    ├─ GET /api/telemetry        → instruments
+    ├─ GET /api/map + map/image  → carte tactique
+    ├─ GET /api/modules          → module health 0-100
+    └─ GET /api/events           → flux HUD (kills, damage, alerts)
 ```
 
 ---
 
-## 🌐 Interface Web (React)
-
-L'interface web est un remplacement de l'écran Arduino. Elle tourne dans un navigateur et se connecte à War Thunder via `wt_web_bridge.py`.
+## Interface Web (React)
 
 ### Prérequis
 
 ```bash
 # Bridge Python
-pip install flask flask-cors keyboard requests
+pip install flask flask-cors requests pyserial Pillow numpy
 
-# Interface React (depuis le dossier Interface_Figma/)
+# Interface React (depuis Interface_Figma/)
 npm install
 ```
 
-> **Note Windows** : Le module `keyboard` nécessite des droits administrateur pour injecter des frappes clavier globalement. Lancez le bridge depuis un terminal en mode Administrateur.
-
 ### Lancement
 
-**1. Démarrer le bridge web :**
-```bash
-# Depuis la racine du projet
-python pc_bridge/wt_web_bridge.py
-```
-Le serveur démarre sur `http://localhost:8112`.
+1. **Démarrer le bridge web :**
+   ```bash
+   python pc_bridge/wt_web_bridge.py
+   ```
+   Sert sur `http://localhost:8112`.
 
-**2. Démarrer l'interface React :**
+2. **Démarrer l'interface React :**
+   ```bash
+   cd Interface_Figma
+   npm run dev
+   ```
+   Ouvrez `http://localhost:5173`.
+
+3. **Lancer War Thunder** et entrer dans une partie avec un char.
+
+### Build production
+
 ```bash
 cd Interface_Figma
-npm run dev
+npm run build
 ```
-Ouvrez `http://localhost:5173` dans un navigateur (ou dans une fenêtre dédiée sur un écran secondaire).
-
-**3. Lancer War Thunder** et entrer dans une partie avec un char.
-
-### Fonctionnement des commandes
-
-Quand vous appuyez sur un bouton du Dashboard :
-1. L'interface React envoie `POST http://localhost:8112/api/command` avec `{ "key": "G" }`
-2. Le bridge Python reçoit la requête et appelle `keyboard.send("g")`
-3. La touche est injectée globalement → War Thunder reçoit l'entrée
-
-Le statut du bridge est visible dans la barre d'en-tête du Dashboard (icône WiFi).
+La build est écrite dans `pc_bridge/static/`. Le bridge Flask sert alors directement l'app sur `http://localhost:8112`.
 
 ---
 
-## 🖥️ Interface Arduino LVGL (legacy) (mode Arduino)
+## Interface Arduino LVGL
 
 | Composant | Référence | Description |
 |---|---|---|
 | Carte | Arduino GIGA R1 WiFi (ABX00063) | STM32H747XI dual-core, USB-C |
-| Écran | Arduino GIGA Display Shield (ASX00039) | 3.97", 800x480, tactile capacitif, IMU |
-| Câble | USB-C vers USB-A | Connexion PC <-> Arduino |
+| Écran | Arduino GIGA Display Shield (ASX00039) | 3.97", 800×480, tactile capacitif |
+| Câble | USB-C vers USB-A | Connexion PC ↔ Arduino |
 
----
-
-## ⚙️ Installation
-
-### 1. Arduino IDE — Bibliothèques
+### Bibliothèques Arduino
 
 1. Installez **Arduino IDE 2.x**.
-2. Dans le gestionnaire de cartes, installez : `Arduino Mbed OS Giga Boards`.
-3. Dans le gestionnaire de bibliothèques, installez :
+2. Gestionnaire de cartes : `Arduino Mbed OS Giga Boards`.
+3. Gestionnaire de bibliothèques :
    - `Arduino_H7_Video`
    - `Arduino_GigaDisplayTouch`
-   - `lvgl` (**version 9.5 requise**)
-   - `PluggableUSBHID` (incluse dans le pack Mbed)
+   - `lvgl` (**9.5 ou supérieur**)
 
-> Le sketch tourne sur un seul cœur (M7). Le partage Flash Split entre M7 et M4 n'est pas nécessaire : laissez la configuration par défaut d'Arduino IDE.
+Le sketch tourne sur un seul cœur (M7). Laissez la configuration Flash Split par défaut.
 
-### 2. Upload du sketch
+### Génération des assets
 
-1. **Tools → Target Core → Main Core**
+Avant la première compilation (ou après avoir modifié `assets/logo.svg`) :
+
+```bash
+pip install Pillow numpy
+python3 scripts/svg_to_rgb565.py
+python3 scripts/encode_icons.py
+```
+
+Cela produit `Control_Hub_War_Thunder/splash_image.h` et `map_icons.h` (déjà commités, mais à régénérer si le logo change).
+
+### Upload du sketch
+
+1. **Tools → Target Core → Main Core**.
 2. Ouvrez `Control_Hub_War_Thunder/Control_Hub_War_Thunder.ino`.
 3. Sélectionnez la carte **Arduino GIGA R1 WiFi** et le bon port COM.
 4. Flashez.
 
-### 3. Script Python (pont télémétrique)
+### Bridge télémétrique
 
 ```bash
-pip install requests pyserial
-```
-
-Puis lancez :
-
-```bash
+pip install requests pyserial Pillow numpy
 python pc_bridge/wt_telemetry.py
 ```
 
 ---
 
-## 🕹️ Utilisation
-
-1. Branchez l'Arduino GIGA en USB-C sur votre PC.
-2. Lancez War Thunder et entrez dans une partie ou un essai de véhicule avec un **char**.
-3. Lancez le script Python.
-4. L'écran principal affiche le panneau de commandes. Appuyez sur **TELEMETRY** (haut droite) pour voir les données en direct, ou sur **CARTE** (haut droite, à côté de TELEMETRY) pour voir la carte tactique en temps réel.
-
----
-
-## 🎯 Raccourcis configurés (War Thunder - Mode Chars)
-
-| Bouton | Touche | Action in-game |
-|---|---|---|
-| EXTINCTEUR | `6` | Activer l'extincteur automatique |
-| FUMIGENE | `G` | Lancer les grenades fumigènes |
-| ARTILLERIE | `5` | Appel artillerie / marqueur |
-| JUMELLES | `B` | Activer les jumelles |
-| VUE TIREUR | `Shift` | Passer en vue lunette tireur (sniper) |
-| MOTEUR | `I` | Couper / démarrer le moteur |
-| REPARATION | `F` | Réparer le véhicule |
-
-> Ces raccourcis sont ceux par défaut de War Thunder. Si vous les avez personnalisés, modifiez les callbacks `cb_*` dans le fichier `.ino`.
-
----
-
-## 📡 API War Thunder - Documentation complète (localhost:8111)
+## API War Thunder — Documentation (localhost:8111)
 
 War Thunder expose ses données télémétriques sur `http://127.0.0.1:8111` automatiquement dès qu'une partie est lancée. Ce serveur local s'arrête à la fin de la session.
 
-> **Avertissement** : Gaijin Entertainment ne garantit pas la stabilité de cette API entre les mises à jour. Les noms de clés peuvent changer selon la version du client ou le type de véhicule.
+> Gaijin Entertainment ne garantit pas la stabilité de cette API entre les mises à jour. Les noms de clés peuvent changer selon la version du client ou le type de véhicule.
 
-### Vue d'ensemble des endpoints
+### Endpoints utilisés
 
 | Endpoint | Format | Description |
 |---|---|---|
-| `/indicators` | JSON | Données instruments en temps réel |
-| `/state` | JSON | Etat général de la session |
-| `/map_info.json` | JSON | Métadonnées de la carte en cours |
-| `/map_obj.json` | JSON Array | Objets sur la carte (véhicules, objectifs) |
-| `/map.img` | JPEG | Image bitmap de la carte (1024x1024 px) |
-| `/mission.json` | JSON | Objectifs et statut de la mission |
+| `/indicators` | JSON | Instruments en temps réel |
+| `/state` | JSON | État général de la session |
+| `/map_info.json` | JSON | Métadonnées de la carte (incluant `map_generation`) |
+| `/map_obj.json` | JSON | Objets sur la carte (véhicules, objectifs) |
+| `/map.img` | JPEG | Image bitmap de la carte (1024×1024) |
 | `/hudmsg` | JSON | Messages HUD (dégâts, kills, alertes) |
-| `/gamechat` | JSON | Messages du chat en jeu |
+
+### Clés `/indicators` consommées
+
+`speed`, `rpm`, `gear`, `first_stage_ammo`, `crew_current`, `crew_total`, `stabilizer`, `fuel`, `type`, `army`, `engine_on_fire`, `driver_state`, `gunner_state`, `has_speed_warning`, `lws`, `ircm`.
+
+### Clés `/map_obj.json` consommées
+
+`type`, `color`, `blink`, `x`, `y`, `ex`, `ey` (utilisées pour la rotation des véhicules via `atan2(ey-y, ex-x)`).
+
+### Clés `/hudmsg` consommées
+
+- `events[].msg` → `EVT:K:` (kill) ou `EVT:A:` (alert).
+- `damage[].msg` → `EVT:D:` (damage) et décrément du `module_health` correspondant via les mots-clés `engine`, `transmission`, `track`, `barrel`, `turret`. Décrément `-35` pour `destroyed/broken`, `-15` pour `damaged/jammed/hit`.
 
 ---
 
-### `/indicators` - Instruments (Chars)
+## Protocole Serial (Arduino ↔ Python)
 
-Clés disponibles pour les véhicules terrestres (`army: tank`) :
+Le script Python envoie 4 types de lignes texte sur le port série, toutes terminées par `\n`.
 
-| Clé JSON | Type | Description |
-|---|---|---|
-| `speed` | float (m/s) | Vitesse du véhicule |
-| `rpm` | float | Régime moteur en tours/minute |
-| `gear` | float | Rapport de vitesse engagé |
-| `gear_neutral` | float | Valeur du rapport neutre |
-| `first_stage_ammo` | float | Munitions dans le chargeur automatique |
-| `crew_current` | float | Membres d'équipage en vie |
-| `crew_total` | float | Membres d'équipage total |
-| `stabilizer` | float | Stabilisateur : `1.0` = actif, `0.0` = inactif |
-| `cruise_control` | float | Régulateur de vitesse : `1.0` = actif |
-| `driver_state` | float | Etat conducteur (`0` = vivant) |
-| `gunner_state` | float | Etat tireur (`0` = vivant) |
-| `has_speed_warning` | float | Alerte survitesse : `1.0` = active |
-| `ircm` | float | Contre-mesures IR (`-1` = absent sur ce véhicule) |
-| `lws` | float | Laser Warning System (`-1` = absent) |
-| `driving_direction_mode` | float | Mode direction (`0` = normal) |
-| `army` | string | Type : `tank`, `aviation`, `ship` |
-| `type` | string | Modèle exact (ex: `tankModels/us_m1a2_abrams`) |
-| `valid` | bool | `true` si les données sont valides |
+### Télémétrie (10 Hz)
+
+```
+SPD:42|RPM:2100|GEAR:4.0|AMMO:18|STAB:1|FUEL:78|CREW:4/4|TANK:US_M1A2_ABRAMS|
+  DRV:0|GUN:0|FIRE:0|OVER:0|LWS:-1|IRCM:-1|STATUS:1
+```
+
+### Carte tactique (5 Hz)
+
+```
+MAPNAME:MAP42|MAPOBJ:0.52,0.48,T,0;0.30,0.65,t,90;0.70,0.20,O,0
+```
+
+| Code | Entité | Couleur |
+|------|--------|---------|
+| `T` | Tank allié | Vert |
+| `t` | Tank ennemi | Rouge |
+| `P` | Aircraft allié | Vert |
+| `p` | Aircraft ennemi | Rouge |
+| `O` | Objectif / zone de capture | Jaune |
+| `F` | Aérodrome | Bleu |
+| `B` | Bomb point | Rouge |
+| `R` | Respawn base | Bleu |
+| `N` | Autre | Gris |
+
+Le quatrième champ optionnel est l'orientation (degrés entiers, 0-359). Pour rétro-compatibilité, le parser Arduino accepte aussi le format ancien à 3 champs.
+
+### Module integrity (1 Hz)
+
+```
+MOD:ENG:100|TRANS:80|TURR:100|GUN:90|TRKL:60|TRKR:100
+```
+
+### Event feed (au fil de l'eau)
+
+```
+EVT:K:Player has destroyed an enemy
+EVT:D:Engine damaged
+EVT:A:Returning to battle area
+```
+
+Préfixes : `K` = kill, `D` = damage, `A` = alert.
+
+### Carte image (1× par `map_generation`)
+
+```
+MAPRAW:<base64-RGB565-little-endian>
+```
+
+Le payload base64 décode en exactement 19 240 octets (148 × 65 × 2). Côté Arduino, le décodage se fait dans un tampon temporaire puis est copié sous mutex dans le tampon affiché par LVGL, évitant tout tearing visuel.
 
 ---
 
-### `/state` - Etat de la session
+## Boîtier 3D recommandé
 
-| Clé JSON | Type | Description |
-|---|---|---|
-| `valid` | bool | `true` si une partie est en cours |
-| `isPaused` | bool | `true` si la partie est en pause |
-| `isReplay` | bool | `true` si on regarde un replay |
-| `isNetworkGame` | bool | `true` pour les parties en ligne |
-
-> Utile pour détecter proprement le début et la fin d'une partie avant de lire `/indicators`.
-
----
-
-### `/map_info.json` - Metadonnées de la carte
-
-Cet endpoint retourne un objet JSON décrivant les **propriétés géographiques et dimensionnelles** de la carte en cours. Il est indispensable pour convertir les coordonnées relatives (entre 0.0 et 1.0) des objets retournés par `/map_obj.json` en positions réelles.
-
-**Exemple de réponse JSON :**
-```json
-{
-  "map_generation": 42,
-  "map_min": [0.0, 0.0],
-  "map_max": [1.0, 1.0]
-}
-```
-
-| Clé JSON | Type | Description |
-|---|---|---|
-| `map_generation` | int | Numero de generation de la carte. S'incremente a chaque rechargement. Utile pour detecter un changement de map. |
-| `map_min` | array [float, float] | Coordonnees normalisees du coin **superieur gauche** `[x_min, y_min]` (generalement `[0.0, 0.0]`) |
-| `map_max` | array [float, float] | Coordonnees normalisees du coin **inferieur droit** `[x_max, y_max]` (generalement `[1.0, 1.0]`) |
-
-**Convertir les coordonnees en pixels (image 1024x1024) :**
-```python
-pixel_x = obj['x'] * 1024
-pixel_y = obj['y'] * 1024
-```
-
-**Detecter un changement de carte :**
-```python
-last_generation = 0
-info = requests.get('http://127.0.0.1:8111/map_info.json').json()
-if info['map_generation'] != last_generation:
-    last_generation = info['map_generation']
-    # Re-telecharger map.img et mettre a jour l'affichage
-```
-
----
-
-### `/map_obj.json` - Objets sur la carte
-
-Retourne un **tableau JSON** contenant tous les objets affichés sur la minimap : vehicules allies, ennemis detectes, objectifs, points de capture, aerodromes, etc.
-
-**Exemple d'un objet :**
-```json
-[
-  {
-    "type": "airfield",
-    "icon": "airfield",
-    "color": "#1a8a1a",
-    "color2": "#1a8a1a",
-    "blink": 0,
-    "x": 0.213,
-    "y": 0.445,
-    "ex": 0.0,
-    "ey": 0.0
-  }
-]
-```
-
-| Clé JSON | Type | Description |
-|---|---|---|
-| `type` | string | Type d'objet : `airfield`, `tank`, `aircraft`, `capture_zone`, `respawn_base_tank`, `bomb_point`, etc. |
-| `icon` | string | Icone associee a cet objet sur la minimap |
-| `color` | string (hex) | Couleur de l'objet. **Rouge** (`#f40c00`, `#ff0000`) = ennemi. **Vert** = allie. |
-| `color2` | string (hex) | Couleur secondaire (objets bicolores) |
-| `blink` | int | `1` = l'objet clignote (menace active ou objectif urgent), `0` = statique |
-| `x` | float (0.0-1.0) | Position normalisee horizontale sur la carte |
-| `y` | float (0.0-1.0) | Position normalisee verticale sur la carte |
-| `ex` | float | Coordonnee X de l'extremite (objets allonges comme les pistes) |
-| `ey` | float | Coordonnee Y de l'extremite |
-
-**Detecter les ennemis en Python :**
-```python
-ENEMY_COLORS = ['#f40c00', '#ff0d00', '#ff0000']
-
-def is_enemy(obj):
-    return obj['color'].lower() in ENEMY_COLORS or obj['blink'] == 1
-
-objects = requests.get('http://127.0.0.1:8111/map_obj.json').json()
-enemies = [o for o in objects if is_enemy(o)]
-print(f"{len(enemies)} ennemi(s) detecte(s) sur la carte")
-```
-
----
-
-### `/map.img` - Image de la carte
-
-Retourne le **fichier JPEG de la minimap** en cours (resolution **1024x1024 pixels**). A combiner avec `/map_obj.json` pour afficher les positions des vehicules par-dessus.
-
-```python
-import requests
-with open('map.jpg', 'wb') as f:
-    f.write(requests.get('http://127.0.0.1:8111/map.img').content)
-```
-
-> L'image change a chaque nouvelle carte. Utilisez `map_generation` de `/map_info.json` pour detecter le changement et re-telecharger l'image automatiquement.
-
----
-
-### `/mission.json` - Objectifs de la mission
-
-| Clé JSON | Type | Description |
-|---|---|---|
-| `mission_success` | string | Statut global : `"success"`, `"fail"`, ou `"progress"` |
-| `success_conditions` | array | Liste des conditions de victoire et leur etat |
-| `fail_conditions` | array | Liste des conditions d'echec et leur etat |
-
-> **Attention** : Ce endpoint est connu pour retourner des statuts errones (ex: `"success"` premature). A utiliser avec prudence pour la detection de fin de partie.
-
----
-
-### `/hudmsg` - Messages HUD
-
-| Clé JSON | Type | Description |
-|---|---|---|
-| `events` | array | Liste des evenements recents (kills, alertes...) |
-| `events[].msg` | string | Texte du message (ex: `"You have destroyed an enemy"`) |
-| `events[].sender` | string | Expediteur du message |
-| `events[].enemy` | bool | `true` si concerne un ennemi |
-| `damage` | array | Dommages infliges/recus |
-| `damage[].msg` | string | Description du dommage (module touche, etc.) |
-| `damage[].playerName` | string | Nom du joueur concerne |
-
----
-
-### `/gamechat` - Chat en jeu
-
-| Clé JSON | Type | Description |
-|---|---|---|
-| `messages` | array | Liste des messages |
-| `messages[].msg` | string | Contenu du message |
-| `messages[].sender` | string | Pseudonyme de l'expediteur |
-| `messages[].enemy` | bool | `true` si le message vient du camp ennemi |
-| `messages[].mode` | string | Mode du chat : `"Squad"`, `"Allies"`, `"All"` |
-
----
-
-## 🔧 Format du protocole Serial (Arduino <-> Python)
-
-Le script Python envoie deux types de lignes texte sur le port série.
-
-### Message télémétrie (10 Hz)
-
-```
-SPD:{int}|RPM:{int}|GEAR:{val}|AMMO:{int}|STAB:{0/1}|CREW:{n}/{total}|TANK:{nom}|STATUS:{0/1}
-```
-
-**Exemple en partie :**
-```
-SPD:42|RPM:2100|GEAR:4.0|AMMO:18|STAB:1|CREW:4/4|TANK:US_M1A2_ABRAMS|STATUS:1
-```
-
-L'Arduino parse cette chaine dans `parse_and_update()` et met a jour l'interface LVGL en consequence.
-
-### Message carte (2 Hz)
-
-```
-MAPNAME:{nom}|MAPOBJ:{x},{y},{type};{x},{y},{type};...
-```
-
-Les positions `x` et `y` sont des flottants normalises entre 0.0 et 1.0. Le champ `{type}` est un caractère unique :
-
-| Code | Signification | Couleur |
-|------|--------------|---------|
-| `A`  | Allié        | Vert    |
-| `E`  | Ennemi       | Rouge   |
-| `O`  | Objectif / zone de capture | Jaune |
-| `F`  | Aérodrome    | Gris    |
-| `N`  | Autre        | Gris clair |
-
-**Exemple :**
-```
-MAPNAME:MAP42|MAPOBJ:0.52,0.48,A;0.30,0.65,E;0.70,0.20,O
-```
-
-L'Arduino parse cette chaine dans `parse_map_update()` et repositionne les points sur l'ecran Carte.
-
----
-
-## 🖥️ Interface - Apercu
-
-### Ecran 1 - Panneau de commandes
-- Fond noir mat (Carbone)
-- Barre HUD verte (type terminal militaire) affichant le modele de char, vitesse et etat equipage
-- 6 boutons tactiles de couleurs militaires (Olive Drab, Rouge Danger, Gris Acier)
-- Bouton REPARATION vertical sur la droite
-- Bouton **TELEMETRY** (haut droite) -> transition animee vers l'ecran 2
-- Bouton **CARTE** (haut droite, adjacent a TELEMETRY) -> transition animee vers l'ecran 3
-
-### Ecran 2 - Telemetrie
-- Indicateur de connexion `[OK] PC BRIDGE: ONLINE` (vert) / `[!!] OFFLINE` (rouge)
-- 3 blocs de donnees : Vitesse, RPM, Rapport
-- Flux brut de donnees en bas
-- Bouton retour vers l'ecran 1
-
-### Ecran 3 - Carte Tactique
-- Zone de carte 740×325 px sur fond sombre
-- Points colores mis a jour en temps reel (2 Hz via script Python) :
-  - **Vert** — Allié
-  - **Rouge** — Ennemi
-  - **Jaune** — Objectif / zone de capture
-  - **Gris** — Aérodrome
-- Nom de la carte (identifiant) affiché en haut à droite
-- Bouton retour vers l'ecran 1
-
----
-
-## 🏠 Boitier 3D recommande
-
-Pour un usage bureau optimal, modelisez (Fusion 360, FreeCAD) un boitier incline a **30-45 degres** en **PLA ou PETG** avec :
+Pour un usage bureau optimal, modélisez (Fusion 360, FreeCAD) un boîtier incliné à **30-45 degrés** en **PLA ou PETG** avec :
 - Standoffs M3 internes pour fixer la carte
 - Encoche USB-C sur la tranche
-- Fentes d'aeration style grille de blindage
-- Texture "Fuzzy Skin" dans le slicer pour un rendu metallique
+- Fentes d'aération style grille de blindage
+- Texture "Fuzzy Skin" dans le slicer pour un rendu métallique
 
 ---
 
-## 📄 Licence
+## Licence
 
-MIT License - Libre d'utilisation, de modification et de distribution.
+MIT — libre d'utilisation, de modification et de distribution.
